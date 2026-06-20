@@ -11,13 +11,13 @@ export const dynamic = "force-dynamic";
 
 type MembershipPlan = {
   id: string;
-  gym_id?: string;
+  gym_id: string;
   name: string;
   duration_days: number;
   price: string | number;
-  schedule?: string | null;
+  schedule: string | null;
   is_active: boolean;
-  created_at?: string;
+  created_at: string;
 };
 
 type MemberUser = {
@@ -60,7 +60,7 @@ async function getPlans(gymId: string) {
       name,
       duration_days,
       price,
-      schedule,
+      coalesce(schedule, 'Consultar horarios disponibles en el local') as schedule,
       is_active,
       created_at
     from membership_plans
