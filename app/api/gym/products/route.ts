@@ -41,17 +41,16 @@ export async function GET() {
         id,
         gym_id,
         name,
-        description,
-        category,
+        image_url,
         price,
         stock,
-        min_stock,
+        stock_entry_date,
         is_active,
         created_at,
         updated_at
       from products
       where gym_id = ${session.gymId}
-      order by created_at desc
+      order by name asc
     `;
 
     return NextResponse.json({
@@ -96,11 +95,8 @@ export async function POST(request: Request) {
     const body = await request.json();
 
     const name = cleanString(body.name);
-    const description = cleanString(body.description);
-    const category = cleanString(body.category);
+    const imageUrl = cleanString(body.imageUrl);
     const price = cleanNumber(body.price);
-    const stock = cleanNumber(body.stock);
-    const minStock = cleanNumber(body.minStock);
 
     if (!name) {
       return NextResponse.json(
@@ -116,14 +112,7 @@ export async function POST(request: Request) {
       );
     }
 
-    if (stock < 0) {
-      return NextResponse.json(
-        { ok: false, message: "El stock no puede ser negativo" },
-        { status: 400 }
-      );
-    }
-
-    const existing = await sql`
+    const duplicate = await sql`
       select id
       from products
       where gym_id = ${session.gymId}
@@ -131,7 +120,7 @@ export async function POST(request: Request) {
       limit 1
     `;
 
-    if (existing.length > 0) {
+    if (duplicate.length > 0) {
       return NextResponse.json(
         { ok: false, message: "Ya existe un producto con ese nombre" },
         { status: 409 }
@@ -142,32 +131,31 @@ export async function POST(request: Request) {
       insert into products (
         gym_id,
         name,
-        description,
-        category,
+        image_url,
         price,
         stock,
         min_stock,
+        stock_entry_date,
         is_active
       )
       values (
         ${session.gymId},
         ${name},
-        ${description || null},
-        ${category || null},
+        ${imageUrl || null},
         ${price},
-        ${stock},
-        ${minStock},
+        0,
+        0,
+        null,
         true
       )
       returning
         id,
         gym_id,
         name,
-        description,
-        category,
+        image_url,
         price,
         stock,
-        min_stock,
+        stock_entry_date,
         is_active,
         created_at,
         updated_at
@@ -226,11 +214,8 @@ export async function PATCH(request: Request) {
     const body = await request.json();
 
     const name = cleanString(body.name);
-    const description = cleanString(body.description);
-    const category = cleanString(body.category);
+    const imageUrl = cleanString(body.imageUrl);
     const price = cleanNumber(body.price);
-    const stock = cleanNumber(body.stock);
-    const minStock = cleanNumber(body.minStock);
     const isActive = Boolean(body.isActive);
 
     if (!name) {
@@ -240,17 +225,14 @@ export async function PATCH(request: Request) {
       );
     }
 
-    if (price < 0 || stock < 0 || minStock < 0) {
+    if (price < 0) {
       return NextResponse.json(
-        {
-          ok: false,
-          message: "Precio, stock y stock mínimo no pueden ser negativos",
-        },
+        { ok: false, message: "El precio no puede ser negativo" },
         { status: 400 }
       );
     }
 
-    const exists = await sql`
+    const productExists = await sql`
       select id
       from products
       where id = ${productId}
@@ -258,7 +240,7 @@ export async function PATCH(request: Request) {
       limit 1
     `;
 
-    if (exists.length === 0) {
+    if (productExists.length === 0) {
       return NextResponse.json(
         { ok: false, message: "Producto no encontrado" },
         { status: 404 }
@@ -285,11 +267,8 @@ export async function PATCH(request: Request) {
       update products
       set
         name = ${name},
-        description = ${description || null},
-        category = ${category || null},
+        image_url = ${imageUrl || null},
         price = ${price},
-        stock = ${stock},
-        min_stock = ${minStock},
         is_active = ${isActive},
         updated_at = now()
       where id = ${productId}
@@ -298,11 +277,10 @@ export async function PATCH(request: Request) {
         id,
         gym_id,
         name,
-        description,
-        category,
+        image_url,
         price,
         stock,
-        min_stock,
+        stock_entry_date,
         is_active,
         created_at,
         updated_at
@@ -359,7 +337,7 @@ export async function DELETE(request: Request) {
     }
 
     const product = await sql`
-      select id, name
+      select id
       from products
       where id = ${productId}
         and gym_id = ${session.gymId}

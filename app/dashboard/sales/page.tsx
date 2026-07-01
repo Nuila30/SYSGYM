@@ -9,28 +9,32 @@ export const dynamic = "force-dynamic";
 type Product = {
   id: string;
   name: string;
-  category?: string | null;
+  image_url?: string | null;
   price: string | number;
   stock: number;
   is_active: boolean;
 };
 
-type Sale = {
+type ProductSaleSummary = {
+  id: string;
+  name: string;
+  image_url?: string | null;
+  price: string | number;
+  stock: number;
+  units_sold: number;
+  revenue: string | number;
+};
+
+type RecentSale = {
   id: string;
   total: string | number;
   payment_method: string;
-  reference_code?: string | null;
-  notes?: string | null;
   sale_date: string;
   status: string;
-  created_at: string;
+  product_name: string | null;
+  quantity: number | null;
+  unit_price: string | number | null;
   created_by_name?: string | null;
-  product_id?: string | null;
-  product_name?: string | null;
-  category?: string | null;
-  quantity?: number | null;
-  unit_price?: string | number | null;
-  subtotal?: string | number | null;
 };
 
 async function getProducts(gymId: string) {
@@ -38,7 +42,7 @@ async function getProducts(gymId: string) {
     select
       id,
       name,
-      category,
+      image_url,
       price,
       stock,
       is_active
@@ -50,33 +54,72 @@ async function getProducts(gymId: string) {
   return products as Product[];
 }
 
-async function getSales(gymId: string) {
+async function getSalesSummary(gymId: string) {
+  const summary = await sql`
+    select
+      p.id,
+      p.name,
+      p.image_url,
+      p.price,
+      p.stock,
+      coalesce(
+        sum(
+          case
+            when s.status = 'COMPLETED' then si.quantity
+            else 0
+          end
+        ),
+        0
+      )::int as units_sold,
+      coalesce(
+        sum(
+          case
+            when s.status = 'COMPLETED' then si.subtotal
+            else 0
+          end
+        ),
+        0
+      ) as revenue
+    from products p
+    left join sale_items si on si.product_id = p.id
+      and si.gym_id = p.gym_id
+    left join sales s on s.id = si.sale_id
+      and s.gym_id = p.gym_id
+    where p.gym_id = ${gymId}
+    group by
+      p.id,
+      p.name,
+      p.image_url,
+      p.price,
+      p.stock
+    order by units_sold desc, revenue desc, p.name asc
+  `;
+
+  return summary as ProductSaleSummary[];
+}
+
+async function getRecentSales(gymId: string) {
   const sales = await sql`
     select
       s.id,
       s.total,
       s.payment_method,
-      s.reference_code,
-      s.notes,
       s.sale_date,
       s.status,
-      s.created_at,
-      u.full_name as created_by_name,
-      si.product_id,
+      p.name as product_name,
       si.quantity,
       si.unit_price,
-      si.subtotal,
-      p.name as product_name,
-      p.category
+      u.full_name as created_by_name
     from sales s
-    left join users u on u.id = s.created_by
     left join sale_items si on si.sale_id = s.id
     left join products p on p.id = si.product_id
+    left join users u on u.id = s.created_by
     where s.gym_id = ${gymId}
-    order by s.sale_date desc, s.created_at desc
+    order by s.created_at desc
+    limit 30
   `;
 
-  return sales as Sale[];
+  return sales as RecentSale[];
 }
 
 export default async function SalesPage() {
@@ -102,7 +145,8 @@ export default async function SalesPage() {
   }
 
   const products = await getProducts(session.gymId);
-  const sales = await getSales(session.gymId);
+  const salesSummary = await getSalesSummary(session.gymId);
+  const recentSales = await getRecentSales(session.gymId);
 
   return (
     <main className="min-h-screen bg-neutral-100 lg:flex">
@@ -120,8 +164,7 @@ export default async function SalesPage() {
             </h1>
 
             <p className="mt-1 text-sm text-neutral-500">
-              Registra ventas de productos y descuenta inventario
-              automáticamente.
+              Registra ventas y consulta qué productos se venden más o menos.
             </p>
           </div>
         </header>
@@ -129,7 +172,8 @@ export default async function SalesPage() {
         <div className="mx-auto max-w-7xl px-6 py-8">
           <SalesManager
             products={products}
-            sales={sales}
+            salesSummary={salesSummary}
+            recentSales={recentSales}
             canCancel={session.role === "GYM_ADMIN"}
           />
         </div>

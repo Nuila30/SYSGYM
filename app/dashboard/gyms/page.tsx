@@ -2,23 +2,39 @@ import Link from "next/link";
 import { sql } from "@/lib/db";
 import { requireSuperAdmin } from "@/lib/session";
 import CreateGymForm from "@/components/CreateGymForm";
-import GymStatusActions from "@/components/GymStatusActions";
 import DashboardMenu from "@/components/DashboardMenu";
+import GymsManager from "@/components/GymsManager";
 
 export const dynamic = "force-dynamic";
 
 type GymRow = {
   id: string;
   name: string;
-  phone: string | null;
-  email: string | null;
-  address: string | null;
+  phone: string;
+  email: string;
+  address: string;
   status: string;
   created_at: string;
+  system_plan_id: string | null;
   plan_name: string | null;
-  monthly_fee: string | null;
-  subscription_end_date: string | null;
+  monthly_fee: string | number | null;
+  access_days: number | null;
+  end_date: string | null;
   subscription_status: string | null;
+  admin_full_name: string | null;
+  admin_username: string | null;
+  admin_email: string | null;
+};
+
+type SystemPlan = {
+  id: string;
+  name: string;
+  code: string;
+  monthly_fee: string | number;
+  access_days: number;
+  description: string | null;
+  features: string[] | null;
+  restrictions: string[] | null;
 };
 
 async function getGyms() {
@@ -26,26 +42,76 @@ async function getGyms() {
     select
       g.id,
       g.name,
-      g.phone,
-      g.email,
-      g.address,
-      g.status,
+      coalesce(g.phone, '') as phone,
+      coalesce(g.email, '') as email,
+      coalesce(g.address, '') as address,
+      g.status::text as status,
       g.created_at,
-      ss.plan_name,
-      ss.monthly_fee,
-      ss.end_date as subscription_end_date,
-      ss.status as subscription_status
+      ss.system_plan_id,
+      coalesce(sp.name, ss.plan_name, 'Plan Mensual') as plan_name,
+      coalesce(sp.monthly_fee, ss.monthly_fee, 0) as monthly_fee,
+      coalesce(ss.access_days, sp.access_days, 30) as access_days,
+      to_char(ss.end_date, 'YYYY-MM-DD') as end_date,
+      coalesce(ss.status::text, g.status::text) as subscription_status,
+      u.full_name as admin_full_name,
+      u.username as admin_username,
+      u.email as admin_email
     from gyms g
-    left join system_subscriptions ss on ss.gym_id = g.id
+    left join lateral (
+      select
+        system_plan_id,
+        plan_name,
+        monthly_fee,
+        access_days,
+        end_date,
+        status,
+        created_at
+      from system_subscriptions
+      where gym_id = g.id
+      order by created_at desc
+      limit 1
+    ) ss on true
+    left join system_plans sp on sp.id = ss.system_plan_id
+    left join lateral (
+      select
+        full_name,
+        username,
+        email
+      from users
+      where gym_id = g.id
+        and role = 'GYM_ADMIN'
+      order by created_at asc
+      limit 1
+    ) u on true
     order by g.created_at desc
   `;
 
   return gyms as GymRow[];
 }
 
+async function getPlans() {
+  const plans = await sql`
+    select
+      id,
+      name,
+      code,
+      monthly_fee,
+      access_days,
+      description,
+      features,
+      restrictions
+    from system_plans
+    where is_active = true
+    order by monthly_fee asc, created_at asc
+  `;
+
+  return plans as SystemPlan[];
+}
+
 export default async function GymsPage() {
   const session = await requireSuperAdmin();
-  const gyms = await getGyms();
+
+  const [gyms, plans] = await Promise.all([getGyms(), getPlans()]);
 
   return (
     <main className="min-h-screen bg-neutral-100 lg:flex">
@@ -64,7 +130,7 @@ export default async function GymsPage() {
               </h1>
 
               <p className="mt-1 text-sm text-neutral-500">
-                Registra clientes, crea sus administradores y controla su acceso.
+                Registra clientes, asigna planes y controla su acceso.
               </p>
             </div>
 
@@ -78,111 +144,11 @@ export default async function GymsPage() {
         </header>
 
         <section className="mx-auto grid max-w-7xl gap-6 px-6 py-8 xl:grid-cols-[1fr_1.2fr]">
-          <CreateGymForm />
+          <CreateGymForm plans={plans} />
 
-          <div className="rounded-2xl border bg-white p-6 shadow-sm">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <h2 className="text-xl font-bold text-neutral-900">
-                  Gimnasios registrados
-                </h2>
-
-                <p className="mt-1 text-sm text-neutral-500">
-                  Lista de gimnasios activos o suspendidos dentro del SaaS.
-                </p>
-              </div>
-
-              <span className="rounded-full bg-neutral-100 px-3 py-1 text-xs font-bold text-neutral-700">
-                Total: {gyms.length}
-              </span>
-            </div>
-
-            <div className="mt-6 space-y-4">
-              {gyms.length === 0 ? (
-                <div className="rounded-xl border border-dashed p-6 text-sm text-neutral-500">
-                  Todavía no hay gimnasios registrados.
-                </div>
-              ) : (
-                gyms.map((gym) => (
-                  <div
-                    key={gym.id}
-                    className="rounded-2xl border bg-white p-4 shadow-sm"
-                  >
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <h3 className="text-lg font-bold text-neutral-900">
-                          {gym.name}
-                        </h3>
-
-                        <p className="mt-1 text-sm text-neutral-500">
-                          {gym.email || "Sin correo"} ·{" "}
-                          {gym.phone || "Sin teléfono"}
-                        </p>
-
-                        <p className="text-sm text-neutral-500">
-                          {gym.address || "Sin dirección"}
-                        </p>
-                      </div>
-
-                      <div className="flex flex-col items-end gap-2">
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-bold ${
-                            gym.status === "ACTIVE"
-                              ? "bg-green-100 text-green-700"
-                              : "bg-red-100 text-red-700"
-                          }`}
-                        >
-                          {gym.status}
-                        </span>
-
-                        {gym.subscription_status && (
-                          <span className="rounded-full bg-neutral-100 px-3 py-1 text-xs font-bold text-neutral-700">
-                            {gym.subscription_status}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="mt-4 grid gap-3 text-sm md:grid-cols-3">
-                      <Info label="Plan" value={gym.plan_name || "Sin plan"} />
-
-                      <Info
-                        label="Mensualidad"
-                        value={`$${gym.monthly_fee || "0.00"}`}
-                      />
-
-                      <Info
-                        label="Vence"
-                        value={
-                          gym.subscription_end_date
-                            ? new Date(
-                                gym.subscription_end_date
-                              ).toLocaleDateString("es-SV")
-                            : "Sin fecha"
-                        }
-                      />
-                    </div>
-
-                    <GymStatusActions
-                      gymId={gym.id}
-                      currentStatus={gym.status}
-                    />
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
+          <GymsManager gyms={gyms} plans={plans} />
         </section>
       </section>
     </main>
-  );
-}
-
-function Info({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl bg-neutral-50 p-3">
-      <p className="text-xs text-neutral-500">{label}</p>
-      <p className="mt-1 font-semibold text-neutral-800">{value}</p>
-    </div>
   );
 }

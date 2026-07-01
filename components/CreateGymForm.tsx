@@ -3,35 +3,84 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-export default function CreateGymForm() {
+type SystemPlan = {
+  id: string;
+  name: string;
+  code: string;
+  monthly_fee: string | number;
+  access_days: number;
+  description?: string | null;
+  features?: string[] | null;
+  restrictions?: string[] | null;
+};
+
+type ApiResponse = {
+  ok?: boolean;
+  message?: string;
+  error?: string;
+  emailSent?: boolean;
+  emailError?: string | null;
+};
+
+export default function CreateGymForm({
+  plans: rawPlans,
+}: {
+  plans?: SystemPlan[];
+}) {
   const router = useRouter();
 
-  const [loading, setLoading] = useState(false);
+  const plans = Array.isArray(rawPlans) ? rawPlans : [];
+
+  const [gymName, setGymName] = useState("");
+  const [gymPhone, setGymPhone] = useState("");
+  const [gymEmail, setGymEmail] = useState("");
+  const [gymAddress, setGymAddress] = useState("");
+
+  const [systemPlanId, setSystemPlanId] = useState(plans[0]?.id || "");
+
+  const [adminFullName, setAdminFullName] = useState("");
+  const [adminEmail, setAdminEmail] = useState("");
+  const [adminPhone, setAdminPhone] = useState("");
+
   const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const [form, setForm] = useState({
-    gymName: "",
-    gymPhone: "",
-    gymEmail: "",
-    gymAddress: "",
-    adminFullName: "",
-    adminUsername: "",
-    adminEmail: "",
-    adminPassword: "",
-    planName: "Plan Mensual",
-    monthlyFee: "55",
-    subscriptionDays: "30",
-  });
+  const selectedPlan = plans.find((plan) => plan.id === systemPlanId);
+  const selectedAccessDays = Number(selectedPlan?.access_days || 30);
 
-  function updateField(field: string, value: string) {
-    setForm((prev) => ({
-      ...prev,
-      [field]: value,
-    }));
+  async function readJsonResponse(res: Response): Promise<ApiResponse> {
+    const text = await res.text();
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      console.error("Respuesta no JSON:", text);
+
+      return {
+        ok: false,
+        message:
+          "La API no respondió correctamente. Revisa app/api/super-admin/gyms/route.ts",
+      };
+    }
   }
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+
+    if (!gymName || !gymPhone || !gymEmail || !gymAddress) {
+      setMessage("Completa los datos del gimnasio");
+      return;
+    }
+
+    if (!systemPlanId) {
+      setMessage("Selecciona un plan para el gimnasio");
+      return;
+    }
+
+    if (!adminFullName || !adminEmail || !adminPhone) {
+      setMessage("Completa los datos del administrador");
+      return;
+    }
 
     setLoading(true);
     setMessage("");
@@ -43,38 +92,37 @@ export default function CreateGymForm() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          ...form,
-          monthlyFee: Number(form.monthlyFee),
-          subscriptionDays: Number(form.subscriptionDays),
+          name: gymName,
+          phone: gymPhone,
+          email: gymEmail,
+          address: gymAddress,
+          systemPlanId,
+          adminFullName,
+          adminEmail,
+          adminPhone,
         }),
       });
 
-      const data = await res.json();
+      const data = await readJsonResponse(res);
 
       if (!res.ok || !data.ok) {
-        setMessage(data.message || "Error al registrar gimnasio");
+        setMessage(data.message || data.error || "Error al registrar gimnasio");
         return;
       }
 
-      setMessage("Gimnasio registrado correctamente");
+      setMessage(data.message || "Gimnasio registrado y credenciales enviadas correctamente");
 
-      setForm({
-        gymName: "",
-        gymPhone: "",
-        gymEmail: "",
-        gymAddress: "",
-        adminFullName: "",
-        adminUsername: "",
-        adminEmail: "",
-        adminPassword: "",
-        planName: "Plan Mensual",
-        monthlyFee: "55",
-        subscriptionDays: "30",
-      });
+      setGymName("");
+      setGymPhone("");
+      setGymEmail("");
+      setGymAddress("");
+      setAdminFullName("");
+      setAdminEmail("");
+      setAdminPhone("");
 
       router.refresh();
     } catch (error) {
-      console.error(error);
+      console.error("Error registrando gimnasio:", error);
       setMessage("Error de conexión con el servidor");
     } finally {
       setLoading(false);
@@ -82,132 +130,211 @@ export default function CreateGymForm() {
   }
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="rounded-2xl border bg-white p-6 shadow-sm"
-    >
+    <section className="rounded-2xl border bg-white p-6 shadow-sm">
       <h2 className="text-xl font-bold text-neutral-900">
         Registrar nuevo gimnasio
       </h2>
 
       <p className="mt-1 text-sm text-neutral-500">
-        Crea el gimnasio cliente, su suscripción y su usuario administrador.
+        Crea el gimnasio, asigna un plan y genera automáticamente el usuario
+        administrador.
       </p>
 
-      <div className="mt-6 grid gap-4 md:grid-cols-2">
-        <Input
-          label="Nombre del gimnasio"
-          value={form.gymName}
-          onChange={(value) => updateField("gymName", value)}
-          placeholder="Ej. Power Gym"
-        />
+      <form onSubmit={handleSubmit} className="mt-6 space-y-6">
+        <div>
+          <h3 className="mb-4 font-bold text-neutral-900">
+            Datos del gimnasio
+          </h3>
 
-        <Input
-          label="Teléfono del gimnasio"
-          value={form.gymPhone}
-          onChange={(value) => updateField("gymPhone", value)}
-          placeholder="7000-0000"
-        />
+          <div className="grid gap-4 md:grid-cols-2">
+            <Input
+              label="Nombre del gimnasio"
+              value={gymName}
+              onChange={setGymName}
+              placeholder="Ej. Power Gym"
+            />
 
-        <Input
-          label="Correo del gimnasio"
-          type="email"
-          value={form.gymEmail}
-          onChange={(value) => updateField("gymEmail", value)}
-          placeholder="contacto@gym.com"
-        />
+            <Input
+              label="Teléfono del gimnasio"
+              value={gymPhone}
+              onChange={setGymPhone}
+              placeholder="7000-0000"
+            />
 
-        <Input
-          label="Dirección"
-          value={form.gymAddress}
-          onChange={(value) => updateField("gymAddress", value)}
-          placeholder="San Salvador"
-        />
-      </div>
+            <Input
+              label="Correo del gimnasio"
+              type="email"
+              value={gymEmail}
+              onChange={setGymEmail}
+              placeholder="contacto@gym.com"
+            />
 
-      <div className="my-6 border-t" />
-
-      <h3 className="text-base font-bold text-neutral-900">
-        Administrador del gimnasio
-      </h3>
-
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
-        <Input
-          label="Nombre completo"
-          value={form.adminFullName}
-          onChange={(value) => updateField("adminFullName", value)}
-          placeholder="Nombre del encargado"
-        />
-
-        <Input
-          label="Usuario"
-          value={form.adminUsername}
-          onChange={(value) => updateField("adminUsername", value)}
-          placeholder="powergym_admin"
-        />
-
-        <Input
-          label="Correo"
-          type="email"
-          value={form.adminEmail}
-          onChange={(value) => updateField("adminEmail", value)}
-          placeholder="admin@gym.com"
-        />
-
-        <Input
-          label="Contraseña"
-          type="password"
-          value={form.adminPassword}
-          onChange={(value) => updateField("adminPassword", value)}
-          placeholder="Mínimo 8 caracteres"
-        />
-      </div>
-
-      <div className="my-6 border-t" />
-
-      <h3 className="text-base font-bold text-neutral-900">
-        Suscripción del sistema
-      </h3>
-
-      <div className="mt-4 grid gap-4 md:grid-cols-3">
-        <Input
-          label="Plan"
-          value={form.planName}
-          onChange={(value) => updateField("planName", value)}
-          placeholder="Plan Mensual"
-        />
-
-        <Input
-          label="Mensualidad $"
-          type="number"
-          value={form.monthlyFee}
-          onChange={(value) => updateField("monthlyFee", value)}
-          placeholder="55"
-        />
-
-        <Input
-          label="Días de acceso"
-          type="number"
-          value={form.subscriptionDays}
-          onChange={(value) => updateField("subscriptionDays", value)}
-          placeholder="30"
-        />
-      </div>
-
-      {message && (
-        <div className="mt-5 rounded-xl border bg-neutral-50 px-4 py-3 text-sm text-neutral-700">
-          {message}
+            <Input
+              label="Dirección"
+              value={gymAddress}
+              onChange={setGymAddress}
+              placeholder="San Salvador"
+            />
+          </div>
         </div>
-      )}
 
-      <button
-        type="submit"
-        disabled={loading}
-        className="mt-6 rounded-xl bg-neutral-900 px-5 py-3 text-sm font-semibold text-white hover:bg-neutral-800 disabled:opacity-60"
-      >
-        {loading ? "Registrando..." : "Registrar gimnasio"}
-      </button>
-    </form>
+        <div className="border-t pt-6">
+          <h3 className="mb-4 font-bold text-neutral-900">
+            Plan del sistema
+          </h3>
+
+          <div className="grid gap-4 md:grid-cols-[1fr_160px]">
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-neutral-700">
+                Plan
+              </span>
+
+              <select
+                value={systemPlanId}
+                onChange={(e) => setSystemPlanId(e.target.value)}
+                className="w-full rounded-xl border bg-white px-4 py-3 text-neutral-900 outline-none focus:border-neutral-950"
+              >
+                {plans.length === 0 ? (
+                  <option value="">No hay planes creados</option>
+                ) : (
+                  plans.map((plan) => (
+                    <option key={plan.id} value={plan.id}>
+                      {plan.name} - ${Number(plan.monthly_fee || 0).toFixed(2)}
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
+
+            <div className="block">
+              <span className="mb-2 block text-sm font-medium text-neutral-700">
+                Días de acceso
+              </span>
+
+              <div className="rounded-xl border bg-neutral-50 px-4 py-3 font-bold text-neutral-900">
+                {selectedAccessDays} días
+              </div>
+            </div>
+          </div>
+
+          {selectedPlan && (
+            <div className="mt-4 rounded-2xl bg-neutral-50 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="text-sm font-bold text-neutral-900">
+                    {selectedPlan.name} · $
+                    {Number(selectedPlan.monthly_fee || 0).toFixed(2)}
+                  </p>
+
+                  {selectedPlan.description && (
+                    <p className="mt-1 text-sm text-neutral-500">
+                      {selectedPlan.description}
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-xl border bg-white px-4 py-3">
+                  <p className="text-xs font-bold uppercase text-neutral-500">
+                    Días incluidos
+                  </p>
+
+                  <p className="mt-1 text-lg font-black text-neutral-950">
+                    {selectedAccessDays} días
+                  </p>
+                </div>
+              </div>
+
+              {selectedPlan.features && selectedPlan.features.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-bold uppercase text-neutral-500">
+                    Incluye
+                  </p>
+
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-neutral-700">
+                    {selectedPlan.features.map((feature) => (
+                      <li key={feature}>{feature}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {selectedPlan.restrictions &&
+                selectedPlan.restrictions.length > 0 && (
+                  <div className="mt-4">
+                    <p className="text-xs font-bold uppercase text-neutral-500">
+                      Restricciones
+                    </p>
+
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-neutral-700">
+                      {selectedPlan.restrictions.map((restriction) => (
+                        <li key={restriction}>{restriction}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+            </div>
+          )}
+        </div>
+
+        <div className="border-t pt-6">
+          <h3 className="mb-4 font-bold text-neutral-900">
+            Administrador del gimnasio
+          </h3>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <Input
+              label="Nombre completo"
+              value={adminFullName}
+              onChange={setAdminFullName}
+              placeholder="Nombre del encargado"
+            />
+
+            <Input
+              label="Teléfono"
+              value={adminPhone}
+              onChange={setAdminPhone}
+              placeholder="7000-0000"
+            />
+
+            <Input
+              label="Correo"
+              type="email"
+              value={adminEmail}
+              onChange={setAdminEmail}
+              placeholder="admin@gym.com"
+            />
+
+            <div className="rounded-2xl bg-neutral-50 p-4 text-sm text-neutral-600">
+              El usuario y la contraseña se generarán automáticamente usando el
+              nombre completo y teléfono del administrador. Las credenciales se
+              enviarán únicamente por correo.
+            </div>
+          </div>
+        </div>
+
+        {message && (
+          <div
+            className={`rounded-xl border px-4 py-3 text-sm ${
+              message.toLowerCase().includes("correctamente") ||
+              message.toLowerCase().includes("registrado") ||
+              message.toLowerCase().includes("enviadas")
+                ? "border-green-200 bg-green-50 text-green-700"
+                : "border-red-200 bg-red-50 text-red-700"
+            }`}
+          >
+            {message}
+          </div>
+        )}
+
+        <button
+          type="submit"
+          disabled={loading || plans.length === 0}
+          className="rounded-xl bg-neutral-950 px-5 py-3 text-sm font-bold text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {loading ? "Registrando..." : "Registrar gimnasio"}
+        </button>
+      </form>
+    </section>
   );
 }
 
@@ -226,7 +353,7 @@ function Input({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-sm font-medium text-neutral-700">
+      <span className="mb-2 block text-sm font-medium text-neutral-700">
         {label}
       </span>
 
@@ -235,7 +362,7 @@ function Input({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-xl border border-neutral-300 bg-white px-4 py-3 text-neutral-900 outline-none placeholder:text-neutral-400 focus:border-neutral-900"
+        className="w-full rounded-xl border bg-white px-4 py-3 text-neutral-900 outline-none placeholder:text-neutral-400 focus:border-neutral-950"
       />
     </label>
   );

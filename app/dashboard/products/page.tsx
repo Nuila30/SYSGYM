@@ -9,11 +9,10 @@ export const dynamic = "force-dynamic";
 type Product = {
   id: string;
   name: string;
-  description?: string | null;
-  category?: string | null;
+  image_url?: string | null;
   price: string | number;
   stock: number;
-  min_stock: number;
+  stock_entry_date?: string | null;
   is_active: boolean;
 };
 
@@ -22,15 +21,14 @@ async function getProducts(gymId: string) {
     select
       id,
       name,
-      description,
-      category,
+      image_url,
       price,
       stock,
-      min_stock,
+      to_char(stock_entry_date, 'YYYY-MM-DD') as stock_entry_date,
       is_active
     from products
     where gym_id = ${gymId}
-    order by created_at desc
+    order by name asc
   `;
 
   return products as Product[];
@@ -76,8 +74,7 @@ export default async function ProductsPage() {
             </h1>
 
             <p className="mt-1 text-sm text-neutral-500">
-              Administra productos disponibles para la venta dentro del
-              gimnasio.
+              Administra nombre, imagen y precio de los productos.
             </p>
           </div>
         </header>

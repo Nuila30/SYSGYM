@@ -28,6 +28,65 @@ function normalizePaymentMethod(value: string) {
   return "CASH";
 }
 
+async function prepareSalesDatabase() {
+  await sql`
+    drop function if exists discount_stock_after_sale_item() cascade
+  `;
+
+  await sql`
+    create table if not exists sale_items (
+      id uuid primary key default gen_random_uuid(),
+      sale_id uuid not null references sales(id) on delete cascade,
+      gym_id uuid references gyms(id) on delete cascade,
+      product_id uuid references products(id) on delete set null,
+      quantity integer not null default 1,
+      unit_price numeric(10,2) not null default 0,
+      subtotal numeric(10,2) not null default 0,
+      created_at timestamptz not null default now()
+    )
+  `;
+
+  await sql`
+    create table if not exists inventory_movements (
+      id uuid primary key default gen_random_uuid(),
+      gym_id uuid references gyms(id) on delete cascade,
+      product_id uuid references products(id) on delete cascade,
+      movement_type text not null default 'ADJUSTMENT',
+      quantity integer not null default 0,
+      previous_stock integer not null default 0,
+      new_stock integer not null default 0,
+      reason text,
+      created_by uuid references users(id) on delete set null,
+      created_at timestamptz not null default now()
+    )
+  `;
+
+  await sql`
+    alter table inventory_movements
+    add column if not exists gym_id uuid references gyms(id) on delete cascade,
+    add column if not exists product_id uuid references products(id) on delete cascade,
+    add column if not exists movement_type text,
+    add column if not exists quantity integer not null default 0,
+    add column if not exists previous_stock integer not null default 0,
+    add column if not exists new_stock integer not null default 0,
+    add column if not exists reason text,
+    add column if not exists created_by uuid references users(id) on delete set null,
+    add column if not exists created_at timestamptz not null default now()
+  `;
+
+  await sql`
+    update inventory_movements
+    set movement_type = 'ADJUSTMENT'
+    where movement_type is null
+  `;
+
+  await sql`
+    alter table inventory_movements
+    alter column movement_type set default 'ADJUSTMENT',
+    alter column movement_type set not null
+  `;
+}
+
 export async function GET() {
   try {
     const session = await getCurrentSession();
@@ -62,7 +121,7 @@ export async function GET() {
         si.unit_price,
         si.subtotal,
         p.name as product_name,
-        p.category
+        p.image_url
       from sales s
       left join users u on u.id = s.created_by
       left join sale_items si on si.sale_id = s.id
@@ -81,7 +140,7 @@ export async function GET() {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error obteniendo ventas",
+        message: "Error obteniendo ventas: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }
@@ -90,7 +149,12 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  let createdSaleId: string | null = null;
+  let currentGymId: string | null = null;
+
   try {
+    await prepareSalesDatabase();
+
     const session = await getCurrentSession();
 
     if (!session || !session.gymId) {
@@ -99,6 +163,8 @@ export async function POST(request: Request) {
         { status: 401 }
       );
     }
+
+    currentGymId = session.gymId;
 
     if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
       return NextResponse.json(
@@ -166,6 +232,13 @@ export async function POST(request: Request) {
     const unitPrice = Number(product.price || 0);
     const total = unitPrice * quantity;
 
+    if (currentStock <= 0) {
+      return NextResponse.json(
+        { ok: false, message: "Este producto no tiene stock disponible" },
+        { status: 400 }
+      );
+    }
+
     if (quantity > currentStock) {
       return NextResponse.json(
         {
@@ -209,6 +282,8 @@ export async function POST(request: Request) {
         created_at
     `;
 
+    createdSaleId = sale[0].id;
+
     await sql`
       insert into sale_items (
         sale_id,
@@ -219,7 +294,7 @@ export async function POST(request: Request) {
         subtotal
       )
       values (
-        ${sale[0].id},
+        ${createdSaleId},
         ${session.gymId},
         ${productId},
         ${quantity},
@@ -268,12 +343,24 @@ export async function POST(request: Request) {
       sale: sale[0],
     });
   } catch (error) {
-    console.error("Error creando venta:", error);
+    console.error("Error registrando venta:", error);
+
+    if (createdSaleId && currentGymId) {
+      try {
+        await sql`
+          delete from sales
+          where id = ${createdSaleId}
+            and gym_id = ${currentGymId}
+        `;
+      } catch (cleanupError) {
+        console.error("Error limpiando venta incompleta:", cleanupError);
+      }
+    }
 
     return NextResponse.json(
       {
         ok: false,
-        message: "Error registrando venta",
+        message: "Error registrando venta: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }
@@ -283,6 +370,8 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    await prepareSalesDatabase();
+
     const session = await getCurrentSession();
 
     if (!session || !session.gymId) {
@@ -326,7 +415,7 @@ export async function DELETE(request: Request) {
       );
     }
 
-    if (sale[0].status === "CANCELLED") {
+    if (String(sale[0].status) === "CANCELLED") {
       return NextResponse.json(
         { ok: false, message: "Esta venta ya fue cancelada" },
         { status: 400 }
@@ -401,7 +490,7 @@ export async function DELETE(request: Request) {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error cancelando venta",
+        message: "Error cancelando venta: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }

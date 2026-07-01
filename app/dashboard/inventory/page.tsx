@@ -9,25 +9,11 @@ export const dynamic = "force-dynamic";
 type Product = {
   id: string;
   name: string;
-  category?: string | null;
+  image_url?: string | null;
   price: string | number;
   stock: number;
-  min_stock: number;
+  stock_entry_date?: string | null;
   is_active: boolean;
-};
-
-type InventoryMovement = {
-  id: string;
-  product_id: string;
-  product_name: string;
-  category?: string | null;
-  movement_type: string;
-  quantity: number;
-  previous_stock: number;
-  new_stock: number;
-  reason?: string | null;
-  created_at: string;
-  created_by_name?: string | null;
 };
 
 async function getProducts(gymId: string) {
@@ -35,10 +21,10 @@ async function getProducts(gymId: string) {
     select
       id,
       name,
-      category,
+      image_url,
       price,
       stock,
-      min_stock,
+      to_char(stock_entry_date, 'YYYY-MM-DD') as stock_entry_date,
       is_active
     from products
     where gym_id = ${gymId}
@@ -46,31 +32,6 @@ async function getProducts(gymId: string) {
   `;
 
   return products as Product[];
-}
-
-async function getInventoryMovements(gymId: string) {
-  const movements = await sql`
-    select
-      im.id,
-      im.product_id,
-      im.movement_type,
-      im.quantity,
-      im.previous_stock,
-      im.new_stock,
-      im.reason,
-      im.created_at,
-      p.name as product_name,
-      p.category,
-      u.full_name as created_by_name
-    from inventory_movements im
-    join products p on p.id = im.product_id
-    left join users u on u.id = im.created_by
-    where im.gym_id = ${gymId}
-    order by im.created_at desc
-    limit 100
-  `;
-
-  return movements as InventoryMovement[];
 }
 
 export default async function InventoryPage() {
@@ -96,7 +57,6 @@ export default async function InventoryPage() {
   }
 
   const products = await getProducts(session.gymId);
-  const movements = await getInventoryMovements(session.gymId);
 
   return (
     <main className="min-h-screen bg-neutral-100 lg:flex">
@@ -114,13 +74,13 @@ export default async function InventoryPage() {
             </h1>
 
             <p className="mt-1 text-sm text-neutral-500">
-              Controla stock, entradas, salidas y ajustes de productos.
+              Controla imagen, nombre, precio, stock y fecha de ingreso.
             </p>
           </div>
         </header>
 
         <div className="mx-auto max-w-7xl px-6 py-8">
-          <InventoryManager products={products} movements={movements} />
+          <InventoryManager products={products} />
         </div>
       </section>
     </main>

@@ -24,14 +24,25 @@ const roleLabels: Record<string, string> = {
 };
 
 const menuItems: MenuItem[] = [
+  
   {
     label: "Dashboard",
     href: "/dashboard",
     roles: ["SUPER_ADMIN", "GYM_ADMIN", "EMPLOYEE", "MEMBER"],
   },
   {
+    label: "QR Asistencia",
+    href: "/dashboard/attendance",
+    roles: ["GYM_ADMIN", "EMPLOYEE", "MEMBER"],
+  },
+  {
     label: "Gimnasios",
     href: "/dashboard/gyms",
+    roles: ["SUPER_ADMIN"],
+  },
+  {
+    label: "Planes",
+    href: "/dashboard/plans",
     roles: ["SUPER_ADMIN"],
   },
   {
