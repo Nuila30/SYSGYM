@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import AttendanceScanner from "@/components/AttendanceScanner";
 import AttendanceRecords from "@/components/AttendanceRecords";
 
@@ -18,6 +18,7 @@ type AttendanceRecord = {
 type ApiResponse = {
   ok?: boolean;
   message?: string;
+  error?: string;
   myAttendance?: AttendanceRecord[];
   gymAttendance?: AttendanceRecord[];
 };
@@ -31,8 +32,10 @@ export default function AttendanceLivePanel({
   initialGymAttendance: AttendanceRecord[];
   canViewGymAttendance: boolean;
 }) {
-  const [myAttendance, setMyAttendance] = useState(initialMyAttendance);
-  const [gymAttendance, setGymAttendance] = useState(initialGymAttendance);
+  const [myAttendance, setMyAttendance] = useState(initialMyAttendance || []);
+  const [gymAttendance, setGymAttendance] = useState(
+    initialGymAttendance || []
+  );
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [historyMessage, setHistoryMessage] = useState("");
 
@@ -49,7 +52,9 @@ export default function AttendanceLivePanel({
       const data: ApiResponse = await res.json();
 
       if (!res.ok || !data.ok) {
-        setHistoryMessage(data.message || "No se pudo actualizar el historial");
+        setHistoryMessage(
+          data.message || data.error || "No se pudo actualizar el historial"
+        );
         return;
       }
 
@@ -63,26 +68,19 @@ export default function AttendanceLivePanel({
     }
   }
 
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      loadHistory();
-    }, 8000);
-
-    return () => window.clearInterval(interval);
-  }, []);
-
   return (
     <>
       <AttendanceScanner onMarked={loadHistory} />
 
-      <div className="flex items-center justify-between rounded-2xl border bg-white px-5 py-4 shadow-sm">
+      <div className="flex flex-col gap-3 rounded-2xl border bg-white px-5 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="text-sm font-bold text-neutral-900">
             Historial de asistencia
           </p>
 
           <p className="text-xs text-neutral-500">
-            Se actualiza automáticamente después de marcar entrada o salida.
+            Después de registrar entrada o salida, el historial se actualiza
+            automáticamente.
           </p>
         </div>
 
@@ -92,7 +90,7 @@ export default function AttendanceLivePanel({
           disabled={loadingHistory}
           className="rounded-xl border px-4 py-2 text-xs font-bold text-neutral-800 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {loadingHistory ? "Actualizando..." : "Actualizar"}
+          {loadingHistory ? "Actualizando..." : "Actualizar historial"}
         </button>
       </div>
 

@@ -37,6 +37,7 @@ export default function AttendanceScanner({
     return () => {
       stopCamera();
     };
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -57,7 +58,7 @@ export default function AttendanceScanner({
   }
 
   async function markAttendance(tokenValue: string) {
-    const cleanToken = tokenValue.trim();
+    const cleanToken = String(tokenValue || "").trim();
 
     if (!cleanToken) {
       setMessage("Ingresa o escanea un QR válido");
@@ -88,8 +89,13 @@ export default function AttendanceScanner({
         return;
       }
 
+      const successMessage =
+        data.message || "Asistencia registrada correctamente";
+
       setManualToken("");
-      setMessage(data.message || "Asistencia registrada correctamente");
+      setMessage(successMessage);
+
+      window.alert(successMessage);
 
       try {
         await onMarked?.();
@@ -130,6 +136,7 @@ export default function AttendanceScanner({
         )?.id || cameras[0].id;
 
       const scanner = new Html5Qrcode("attendance-qr-reader");
+
       scannerRef.current = scanner;
       scanningRef.current = true;
 
@@ -159,7 +166,7 @@ export default function AttendanceScanner({
           }, 5000);
         },
         () => {
-          // No mostramos error en cada frame para evitar ruido visual.
+          // Evitamos mostrar errores por cada frame de la cámara.
         }
       );
 
@@ -286,7 +293,8 @@ export default function AttendanceScanner({
       {message && (
         <div
           className={`mt-5 rounded-xl border px-4 py-3 text-sm ${
-            message.toLowerCase().includes("correctamente")
+            message.toLowerCase().includes("correctamente") ||
+            message.toLowerCase().includes("registrada")
               ? "border-green-200 bg-green-50 text-green-700"
               : "border-red-200 bg-red-50 text-red-700"
           }`}
