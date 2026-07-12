@@ -8,6 +8,16 @@ import {
   getTemporaryPasswordExpiration,
 } from "@/lib/credentials";
 import { sendCredentialsEmail } from "@/lib/mail";
+import {
+  cleanString,
+  cleanEmail,
+  cleanNumber,
+  isValidEmail,
+  isValidPhone,
+  isValidUuid,
+  validateGymPayload,
+  type FieldErrors,
+} from "@/lib/validacion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,22 +26,20 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Error desconocido";
 }
 
-function cleanString(value: unknown) {
-  return String(value || "").trim();
-}
-
-function cleanEmail(value: unknown) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function cleanNumber(value: unknown) {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : 0;
-}
-
 function cleanAccessDays(value: unknown) {
   const days = Math.trunc(cleanNumber(value || 30));
   return Math.max(1, days);
+}
+
+function validationResponse(errors: FieldErrors) {
+  return NextResponse.json(
+    {
+      ok: false,
+      message: "Hay campos inválidos",
+      errors,
+    },
+    { status: 400 }
+  );
 }
 
 async function requireSuperAdmin() {
@@ -73,6 +81,116 @@ async function cleanupCreatedGym(gymId: string | null) {
   } catch (error) {
     console.error("Error eliminando gimnasio temporal:", error);
   }
+}
+
+type PatchGymPayload = {
+  gymId: string;
+  name: string;
+  phone: string;
+  email: string;
+  address: string;
+  systemPlanId: string;
+  planNameFromBody: string;
+  monthlyFeeFromBody: number;
+  accessDays: number;
+  adminFullName: string;
+  adminUsername: string;
+  adminEmail: string;
+  adminPhone: string;
+};
+
+function validatePatchGymPayload(body: any) {
+  const data: PatchGymPayload = {
+    gymId: cleanString(body.gymId),
+    name: cleanString(body.name),
+    phone: cleanString(body.phone),
+    email: cleanEmail(body.email),
+    address: cleanString(body.address),
+    systemPlanId: cleanString(body.systemPlanId),
+    planNameFromBody: cleanString(body.planName) || "Plan Mensual",
+    monthlyFeeFromBody: cleanNumber(body.monthlyFee),
+    accessDays: cleanAccessDays(body.accessDays || 30),
+    adminFullName: cleanString(body.adminFullName),
+    adminUsername: cleanString(body.adminUsername),
+    adminEmail: cleanEmail(body.adminEmail),
+    adminPhone: cleanString(body.adminPhone) || cleanString(body.phone),
+  };
+
+  const errors: FieldErrors = {};
+
+  if (!data.gymId) {
+    errors.gymId = "Falta el ID del gimnasio";
+  } else if (!isValidUuid(data.gymId)) {
+    errors.gymId = "ID de gimnasio inválido";
+  }
+
+  if (!data.name) {
+    errors.name = "El nombre del gimnasio es obligatorio";
+  } else if (data.name.length < 3) {
+    errors.name = "El nombre debe tener mínimo 3 caracteres";
+  }
+
+  if (!data.phone) {
+    errors.phone = "El teléfono del gimnasio es obligatorio";
+  } else if (!isValidPhone(data.phone)) {
+    errors.phone = "Teléfono inválido";
+  }
+
+  if (!data.email) {
+    errors.email = "El correo del gimnasio es obligatorio";
+  } else if (!isValidEmail(data.email)) {
+    errors.email = "Correo inválido";
+  }
+
+  if (!data.address) {
+    errors.address = "La dirección es obligatoria";
+  }
+
+  if (data.systemPlanId && !isValidUuid(data.systemPlanId)) {
+    errors.systemPlanId = "Plan inválido";
+  }
+
+  if (data.monthlyFeeFromBody < 0) {
+    errors.monthlyFee = "La mensualidad no puede ser negativa";
+  }
+
+  if (data.accessDays < 1) {
+    errors.accessDays = "Los días de acceso deben ser mayores a 0";
+  }
+
+  const hasAdminData =
+    data.adminFullName ||
+    data.adminUsername ||
+    data.adminEmail ||
+    data.adminPhone;
+
+  if (hasAdminData) {
+    if (!data.adminFullName) {
+      errors.adminFullName = "El nombre del administrador es obligatorio";
+    }
+
+    if (!data.adminUsername) {
+      errors.adminUsername = "El usuario del administrador es obligatorio";
+    }
+
+    if (!data.adminEmail) {
+      errors.adminEmail = "El correo del administrador es obligatorio";
+    } else if (!isValidEmail(data.adminEmail)) {
+      errors.adminEmail = "Correo del administrador inválido";
+    }
+
+    if (!data.adminPhone) {
+      errors.adminPhone = "El teléfono del administrador es obligatorio";
+    } else if (!isValidPhone(data.adminPhone)) {
+      errors.adminPhone = "Teléfono del administrador inválido";
+    }
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    data,
+    errors,
+  };
 }
 
 export async function GET() {
@@ -168,37 +286,22 @@ export async function POST(request: Request) {
 
     const body = await request.json();
 
-    const name = cleanString(body.name);
-    const phone = cleanString(body.phone);
-    const email = cleanEmail(body.email);
-    const address = cleanString(body.address);
+    const validation = validateGymPayload(body);
 
-    const systemPlanId = cleanString(body.systemPlanId);
-
-    const adminFullName = cleanString(body.adminFullName);
-    const adminEmail = cleanEmail(body.adminEmail);
-    const adminPhone = cleanString(body.adminPhone);
-
-    if (!name || !phone || !email || !address) {
-      return NextResponse.json(
-        { ok: false, message: "Completa los datos del gimnasio" },
-        { status: 400 }
-      );
+    if (!validation.ok || !validation.data) {
+      return validationResponse(validation.errors);
     }
 
-    if (!systemPlanId) {
-      return NextResponse.json(
-        { ok: false, message: "Selecciona un plan" },
-        { status: 400 }
-      );
-    }
-
-    if (!adminFullName || !adminEmail || !adminPhone) {
-      return NextResponse.json(
-        { ok: false, message: "Completa los datos del administrador" },
-        { status: 400 }
-      );
-    }
+    const {
+      name,
+      phone,
+      email,
+      address,
+      systemPlanId,
+      adminFullName,
+      adminEmail,
+      adminPhone,
+    } = validation.data;
 
     const plan = await sql`
       select
@@ -274,7 +377,6 @@ export async function POST(request: Request) {
     createdGymId = gym[0].id;
 
     const username = await generateUniqueUsername(adminFullName, adminPhone);
-
     const temporaryPassword = generateTemporaryPassword(
       adminFullName,
       adminPhone
@@ -415,35 +517,27 @@ export async function PATCH(request: Request) {
 
     const body = await request.json();
 
-    const gymId = cleanString(body.gymId);
-    const name = cleanString(body.name);
-    const phone = cleanString(body.phone);
-    const email = cleanEmail(body.email);
-    const address = cleanString(body.address);
+    const validation = validatePatchGymPayload(body);
 
-    const systemPlanId = cleanString(body.systemPlanId);
-    const planNameFromBody = cleanString(body.planName) || "Plan Mensual";
-    const monthlyFeeFromBody = cleanNumber(body.monthlyFee);
-    const accessDays = cleanAccessDays(body.accessDays || 30);
-
-    const adminFullName = cleanString(body.adminFullName);
-    const adminUsername = cleanString(body.adminUsername);
-    const adminEmail = cleanEmail(body.adminEmail);
-    const adminPhone = cleanString(body.adminPhone) || phone;
-
-    if (!gymId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del gimnasio" },
-        { status: 400 }
-      );
+    if (!validation.ok) {
+      return validationResponse(validation.errors);
     }
 
-    if (!name || !phone || !email || !address) {
-      return NextResponse.json(
-        { ok: false, message: "Completa los datos del gimnasio" },
-        { status: 400 }
-      );
-    }
+    const {
+      gymId,
+      name,
+      phone,
+      email,
+      address,
+      systemPlanId,
+      planNameFromBody,
+      monthlyFeeFromBody,
+      accessDays,
+      adminFullName,
+      adminUsername,
+      adminEmail,
+      adminPhone,
+    } = validation.data;
 
     const existingGym = await sql`
       select id
@@ -483,17 +577,25 @@ export async function PATCH(request: Request) {
             access_days
           from system_plans
           where id = ${systemPlanId}
+            and is_active = true
           limit 1
         `
       : [];
+
+    if (systemPlanId && plan.length === 0) {
+      return NextResponse.json(
+        { ok: false, message: "Plan no encontrado o inactivo" },
+        { status: 404 }
+      );
+    }
 
     const finalSystemPlanId = plan.length > 0 ? systemPlanId : null;
     const finalPlanName =
       plan.length > 0 ? String(plan[0].name) : planNameFromBody;
     const finalMonthlyFee =
-      plan.length > 0
-        ? Number(plan[0].monthly_fee || 0)
-        : monthlyFeeFromBody;
+      plan.length > 0 ? Number(plan[0].monthly_fee || 0) : monthlyFeeFromBody;
+    const finalAccessDays =
+      plan.length > 0 ? cleanAccessDays(plan[0].access_days || 30) : accessDays;
 
     await sql`
       update gyms
@@ -533,9 +635,9 @@ export async function PATCH(request: Request) {
           ${finalSystemPlanId},
           ${finalPlanName},
           ${finalMonthlyFee},
-          ${accessDays},
+          ${finalAccessDays},
           current_date,
-          current_date + (${accessDays})::integer,
+          current_date + (${finalAccessDays})::integer,
           'ACTIVE',
           now(),
           now()
@@ -548,14 +650,16 @@ export async function PATCH(request: Request) {
           system_plan_id = ${finalSystemPlanId},
           plan_name = ${finalPlanName},
           monthly_fee = ${finalMonthlyFee},
-          access_days = ${accessDays},
-          end_date = current_date + (${accessDays})::integer,
+          access_days = ${finalAccessDays},
+          end_date = current_date + (${finalAccessDays})::integer,
           updated_at = now()
         where id = ${subscription[0].id}
       `;
     }
 
-    if (adminFullName && adminUsername && adminEmail) {
+    const shouldUpdateAdmin = adminFullName && adminUsername && adminEmail;
+
+    if (shouldUpdateAdmin) {
       const existingAdmin = await sql`
         select id
         from users
@@ -639,13 +743,18 @@ export async function DELETE(request: Request) {
     }
 
     const url = new URL(request.url);
-    const gymId = url.searchParams.get("gymId");
+    const gymId = cleanString(url.searchParams.get("gymId"));
+
+    const errors: FieldErrors = {};
 
     if (!gymId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del gimnasio" },
-        { status: 400 }
-      );
+      errors.gymId = "Falta el ID del gimnasio";
+    } else if (!isValidUuid(gymId)) {
+      errors.gymId = "ID de gimnasio inválido";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return validationResponse(errors);
     }
 
     await sql`

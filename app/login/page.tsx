@@ -64,7 +64,7 @@ export default function LoginPage() {
     <main className="relative min-h-screen overflow-hidden bg-black px-4 py-6 md:px-8">
       <div className="absolute inset-0">
         <Image
-          src="/images/Fondo-gym.jpg"
+          src="/images/GYM_TO.png"
           alt="Fondo gimnasio"
           fill
           priority
@@ -80,7 +80,7 @@ export default function LoginPage() {
         {/* PANEL IZQUIERDO */}
         <section className="relative hidden overflow-hidden bg-neutral-950 text-white lg:block">
           <Image
-            src="/images/Fondo-gym.jpg"
+            src="/images/GYM_TO.png"
             alt="Gimnasio"
             fill
             priority

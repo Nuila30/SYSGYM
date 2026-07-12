@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getCurrentSession } from "@/lib/session";
+import {
+  cleanString,
+  isValidUuid,
+  validateSystemPlanPayload,
+  type FieldErrors,
+} from "@/lib/validacion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,21 +15,32 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Error desconocido";
 }
 
-function cleanString(value: unknown) {
-  return String(value || "").trim();
+function validationResponse(errors: FieldErrors) {
+  return NextResponse.json(
+    {
+      ok: false,
+      message: "Hay campos inválidos",
+      errors,
+    },
+    { status: 400 }
+  );
 }
 
-function cleanNumber(value: unknown) {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : 0;
+function cleanNullableInteger(value: unknown) {
+  const text = String(value ?? "").trim();
+
+  if (!text) return null;
+
+  const numberValue = Number(text);
+
+  if (!Number.isFinite(numberValue)) return null;
+
+  const integerValue = Math.trunc(numberValue);
+
+  return integerValue < 0 ? 0 : integerValue;
 }
 
-function cleanInteger(value: unknown) {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? Math.trunc(numberValue) : null;
-}
-
-function cleanTextArray(value: unknown) {
+function normalizeTextArray(value: unknown) {
   if (Array.isArray(value)) {
     return value.map((item) => cleanString(item)).filter(Boolean);
   }
@@ -34,6 +51,14 @@ function cleanTextArray(value: unknown) {
     .filter(Boolean);
 }
 
+function normalizePlanBody(body: any) {
+  return {
+    ...body,
+    features: normalizeTextArray(body.features),
+    restrictions: normalizeTextArray(body.restrictions),
+  };
+}
+
 async function requireSuperAdmin() {
   const session = await getCurrentSession();
 
@@ -42,6 +67,23 @@ async function requireSuperAdmin() {
   }
 
   return session;
+}
+
+function validatePlanId(planId: string | null) {
+  const errors: FieldErrors = {};
+  const cleanPlanId = cleanString(planId);
+
+  if (!cleanPlanId) {
+    errors.planId = "Falta el ID del plan";
+  } else if (!isValidUuid(cleanPlanId)) {
+    errors.planId = "ID de plan inválido";
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    planId: cleanPlanId,
+    errors,
+  };
 }
 
 export async function GET() {
@@ -56,28 +98,29 @@ export async function GET() {
     }
 
     const plans = await sql`
-  select
-    id,
-    name,
-    code,
-    monthly_fee,
-    access_days,
-    description,
-    features,
-    restrictions,
-    max_employees,
-    max_members,
-    max_products,
-    can_use_inventory,
-    can_use_sales,
-    can_use_attendance,
-    can_use_reports,
-    is_active,
-    created_at,
-    updated_at
-  from system_plans
-  order by monthly_fee asc, created_at asc
-`;
+      select
+        id,
+        name,
+        code,
+        monthly_fee,
+        access_days,
+        description,
+        features,
+        restrictions,
+        max_employees,
+        max_members,
+        max_products,
+        can_use_inventory,
+        can_use_sales,
+        can_use_attendance,
+        can_use_reports,
+        is_active,
+        created_at,
+        updated_at
+      from system_plans
+      order by monthly_fee asc, created_at asc
+    `;
+
     return NextResponse.json({
       ok: true,
       data: plans,
@@ -108,100 +151,82 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
+    const normalizedBody = normalizePlanBody(body);
 
-    const name = cleanString(body.name);
-    const code = cleanString(body.code).toUpperCase();
-    const monthlyFee = cleanNumber(body.monthlyFee);
-    const accessDays = Math.max(1, Math.trunc(cleanNumber(body.accessDays || 30)));
-    const description = cleanString(body.description);
-    const features = cleanTextArray(body.features);
-    const restrictions = cleanTextArray(body.restrictions);
+    const validation = validateSystemPlanPayload(normalizedBody);
 
-    const maxEmployees = cleanInteger(body.maxEmployees);
-    const maxMembers = cleanInteger(body.maxMembers);
-    const maxProducts = cleanInteger(body.maxProducts);
-
-    const canUseInventory = Boolean(body.canUseInventory);
-    const canUseSales = Boolean(body.canUseSales);
-    const canUseAttendance = Boolean(body.canUseAttendance);
-    const canUseReports = Boolean(body.canUseReports);
-
-    if (!name) {
-      return NextResponse.json(
-        { ok: false, message: "El nombre del plan es obligatorio" },
-        { status: 400 }
-      );
+    if (!validation.ok || !validation.data) {
+      return validationResponse(validation.errors);
     }
 
-    if (!code) {
-      return NextResponse.json(
-        { ok: false, message: "El código del plan es obligatorio" },
-        { status: 400 }
-      );
-    }
+    const data = validation.data;
 
-    if (monthlyFee < 0) {
-      return NextResponse.json(
-        { ok: false, message: "El precio no puede ser negativo" },
-        { status: 400 }
-      );
-    }
+    const maxEmployees = cleanNullableInteger(body.maxEmployees);
+    const maxMembers = cleanNullableInteger(body.maxMembers);
+    const maxProducts = cleanNullableInteger(body.maxProducts);
 
     const duplicate = await sql`
       select id
       from system_plans
-      where upper(code) = ${code}
+      where upper(code) = ${data.code}
       limit 1
     `;
 
     if (duplicate.length > 0) {
       return NextResponse.json(
-        { ok: false, message: "Ya existe un plan con ese código" },
+        {
+          ok: false,
+          message: "Ya existe un plan con ese código",
+          errors: {
+            code: "Ya existe un plan con ese código",
+          },
+        },
         { status: 409 }
       );
     }
 
     const plan = await sql`
-  insert into system_plans (
-    name,
-    code,
-    monthly_fee,
-    access_days,
-    description,
-    features,
-    restrictions,
-    max_employees,
-    max_members,
-    max_products,
-    can_use_inventory,
-    can_use_sales,
-    can_use_attendance,
-    can_use_reports,
-    is_active,
-    created_at,
-    updated_at
-  )
-  values (
-    ${name},
-    ${code},
-    ${monthlyFee},
-    ${accessDays},
-    ${description || null},
-    ${features},
-    ${restrictions},
-    ${maxEmployees},
-    ${maxMembers},
-    ${maxProducts},
-    ${canUseInventory},
-    ${canUseSales},
-    ${canUseAttendance},
-    ${canUseReports},
-    true,
-    now(),
-    now()
-  )
-  returning *
-`;
+      insert into system_plans (
+        name,
+        code,
+        monthly_fee,
+        access_days,
+        description,
+        features,
+        restrictions,
+        max_employees,
+        max_members,
+        max_products,
+        can_use_inventory,
+        can_use_sales,
+        can_use_attendance,
+        can_use_reports,
+        is_active,
+        created_at,
+        updated_at
+      )
+      values (
+        ${data.name},
+        ${data.code},
+        ${data.monthlyFee},
+        ${data.accessDays},
+        ${data.description || null},
+        ${data.features},
+        ${data.restrictions},
+        ${maxEmployees},
+        ${maxMembers},
+        ${maxProducts},
+        ${data.canUseInventory},
+        ${data.canUseSales},
+        ${data.canUseAttendance},
+        ${data.canUseReports},
+        true,
+        now(),
+        now()
+      )
+      returning *
+    `;
+
     return NextResponse.json({
       ok: true,
       message: "Plan creado correctamente",
@@ -233,85 +258,86 @@ export async function PATCH(request: Request) {
     }
 
     const url = new URL(request.url);
-    const planId = url.searchParams.get("planId");
+    const planIdValidation = validatePlanId(url.searchParams.get("planId"));
 
-    if (!planId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del plan" },
-        { status: 400 }
-      );
+    if (!planIdValidation.ok) {
+      return validationResponse(planIdValidation.errors);
     }
 
+    const planId = planIdValidation.planId;
+
     const body = await request.json();
+    const normalizedBody = normalizePlanBody(body);
 
-    const name = cleanString(body.name);
-    const code = cleanString(body.code).toUpperCase();
-    const monthlyFee = cleanNumber(body.monthlyFee);
-    const description = cleanString(body.description);
-    const features = cleanTextArray(body.features);
-    const restrictions = cleanTextArray(body.restrictions);
-    const accessDays = Math.max(1, Math.trunc(cleanNumber(body.accessDays || 30)));
-    const maxEmployees = cleanInteger(body.maxEmployees);
-    const maxMembers = cleanInteger(body.maxMembers);
-    const maxProducts = cleanInteger(body.maxProducts);
+    const validation = validateSystemPlanPayload(normalizedBody);
 
-    const canUseInventory = Boolean(body.canUseInventory);
-    const canUseSales = Boolean(body.canUseSales);
-    const canUseAttendance = Boolean(body.canUseAttendance);
-    const canUseReports = Boolean(body.canUseReports);
-    const isActive = Boolean(body.isActive);
+    if (!validation.ok || !validation.data) {
+      return validationResponse(validation.errors);
+    }
 
-    if (!name || !code) {
+    const data = validation.data;
+
+    const maxEmployees = cleanNullableInteger(body.maxEmployees);
+    const maxMembers = cleanNullableInteger(body.maxMembers);
+    const maxProducts = cleanNullableInteger(body.maxProducts);
+
+    const existingPlan = await sql`
+      select id
+      from system_plans
+      where id = ${planId}
+      limit 1
+    `;
+
+    if (existingPlan.length === 0) {
       return NextResponse.json(
-        { ok: false, message: "Nombre y código son obligatorios" },
-        { status: 400 }
+        { ok: false, message: "Plan no encontrado" },
+        { status: 404 }
       );
     }
 
     const duplicate = await sql`
       select id
       from system_plans
-      where upper(code) = ${code}
+      where upper(code) = ${data.code}
         and id <> ${planId}
       limit 1
     `;
 
     if (duplicate.length > 0) {
       return NextResponse.json(
-        { ok: false, message: "Ya existe otro plan con ese código" },
+        {
+          ok: false,
+          message: "Ya existe otro plan con ese código",
+          errors: {
+            code: "Ya existe otro plan con ese código",
+          },
+        },
         { status: 409 }
       );
     }
 
     const plan = await sql`
-  update system_plans
-  set
-    name = ${name},
-    code = ${code},
-    monthly_fee = ${monthlyFee},
-    access_days = ${accessDays},
-    description = ${description || null},
-    features = ${features},
-    restrictions = ${restrictions},
-    max_employees = ${maxEmployees},
-    max_members = ${maxMembers},
-    max_products = ${maxProducts},
-    can_use_inventory = ${canUseInventory},
-    can_use_sales = ${canUseSales},
-    can_use_attendance = ${canUseAttendance},
-    can_use_reports = ${canUseReports},
-    is_active = ${isActive},
-    updated_at = now()
-  where id = ${planId}
-  returning *
-`;
-
-    if (plan.length === 0) {
-      return NextResponse.json(
-        { ok: false, message: "Plan no encontrado" },
-        { status: 404 }
-      );
-    }
+      update system_plans
+      set
+        name = ${data.name},
+        code = ${data.code},
+        monthly_fee = ${data.monthlyFee},
+        access_days = ${data.accessDays},
+        description = ${data.description || null},
+        features = ${data.features},
+        restrictions = ${data.restrictions},
+        max_employees = ${maxEmployees},
+        max_members = ${maxMembers},
+        max_products = ${maxProducts},
+        can_use_inventory = ${data.canUseInventory},
+        can_use_sales = ${data.canUseSales},
+        can_use_attendance = ${data.canUseAttendance},
+        can_use_reports = ${data.canUseReports},
+        is_active = ${data.isActive},
+        updated_at = now()
+      where id = ${planId}
+      returning *
+    `;
 
     return NextResponse.json({
       ok: true,
@@ -344,12 +370,25 @@ export async function DELETE(request: Request) {
     }
 
     const url = new URL(request.url);
-    const planId = url.searchParams.get("planId");
+    const planIdValidation = validatePlanId(url.searchParams.get("planId"));
 
-    if (!planId) {
+    if (!planIdValidation.ok) {
+      return validationResponse(planIdValidation.errors);
+    }
+
+    const planId = planIdValidation.planId;
+
+    const existingPlan = await sql`
+      select id
+      from system_plans
+      where id = ${planId}
+      limit 1
+    `;
+
+    if (existingPlan.length === 0) {
       return NextResponse.json(
-        { ok: false, message: "Falta el ID del plan" },
-        { status: 400 }
+        { ok: false, message: "Plan no encontrado" },
+        { status: 404 }
       );
     }
 

@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getCurrentSession } from "@/lib/session";
+import {
+  cleanString,
+  cleanNumber,
+  cleanInteger,
+  isValidUuid,
+  type FieldErrors,
+} from "@/lib/validacion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,20 +16,128 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Error desconocido";
 }
 
-function cleanString(value: unknown) {
-  return String(value || "").trim();
+function validationResponse(errors: FieldErrors) {
+  return NextResponse.json(
+    {
+      ok: false,
+      message: "Hay campos inválidos",
+      errors,
+    },
+    { status: 400 }
+  );
 }
 
-function cleanNumber(value: unknown) {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : 0;
+async function getCurrentGymSession() {
+  const session = await getCurrentSession();
+
+  if (!session || !session.gymId) {
+    return null;
+  }
+
+  return session;
+}
+
+async function requireGymAdmin() {
+  const session = await getCurrentSession();
+
+  if (!session || !session.gymId) {
+    return null;
+  }
+
+  if (session.role !== "GYM_ADMIN") {
+    return null;
+  }
+
+  return session;
+}
+
+function validatePlanId(value: string | null) {
+  const planId = cleanString(value);
+  const errors: FieldErrors = {};
+
+  if (!planId) {
+    errors.planId = "Falta el ID del plan";
+  } else if (!isValidUuid(planId)) {
+    errors.planId = "ID de plan inválido";
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    planId,
+    errors,
+  };
+}
+
+type MembershipPlanPayload = {
+  name: string;
+  durationDays: number;
+  price: number;
+  schedule: string;
+  isActive: boolean;
+};
+
+function validateMembershipPlanPayload(body: any, mode: "create" | "edit") {
+  const data: MembershipPlanPayload = {
+    name: cleanString(body.name),
+    durationDays: cleanInteger(body.durationDays),
+    price: cleanNumber(body.price),
+    schedule: cleanString(body.schedule),
+    isActive:
+      mode === "create"
+        ? true
+        : typeof body.isActive === "boolean"
+        ? body.isActive
+        : Boolean(body.isActive),
+  };
+
+  const errors: FieldErrors = {};
+
+  if (!data.name) {
+    errors.name = "El nombre del plan es obligatorio";
+  } else if (data.name.length < 3) {
+    errors.name = "El nombre debe tener mínimo 3 caracteres";
+  }
+
+  if (data.name.length > 80) {
+    errors.name = "El nombre no puede superar 80 caracteres";
+  }
+
+  if (data.durationDays <= 0) {
+    errors.durationDays = "La duración debe ser mayor a 0 días";
+  }
+
+  if (!Number.isInteger(data.durationDays)) {
+    errors.durationDays = "La duración debe ser un número entero";
+  }
+
+  if (data.durationDays > 3650) {
+    errors.durationDays = "La duración no puede superar 3650 días";
+  }
+
+  if (data.price < 0) {
+    errors.price = "El precio no puede ser negativo";
+  }
+
+  if (data.price > 999999) {
+    errors.price = "El precio es demasiado alto";
+  }
+
+  if (data.schedule.length > 300) {
+    errors.schedule = "El horario no puede superar 300 caracteres";
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    data,
+    errors,
+  };
 }
 
 export async function GET() {
   try {
-    const session = await getCurrentSession();
+    const session = await getCurrentGymSession();
 
-    if (!session || !session.gymId) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autenticado" },
         { status: 401 }
@@ -36,20 +151,37 @@ export async function GET() {
       );
     }
 
-    const plans = await sql`
-      select
-        id,
-        gym_id,
-        name,
-        duration_days,
-        price,
-        schedule,
-        is_active,
-        created_at
-      from membership_plans
-      where gym_id = ${session.gymId}
-      order by duration_days asc, created_at desc
-    `;
+    const plans =
+      session.role === "MEMBER"
+        ? await sql`
+            select
+              id,
+              gym_id,
+              name,
+              duration_days,
+              price,
+              schedule,
+              is_active,
+              created_at
+            from membership_plans
+            where gym_id = ${session.gymId}
+              and is_active = true
+            order by duration_days asc, created_at desc
+          `
+        : await sql`
+            select
+              id,
+              gym_id,
+              name,
+              duration_days,
+              price,
+              schedule,
+              is_active,
+              created_at
+            from membership_plans
+            where gym_id = ${session.gymId}
+            order by duration_days asc, created_at desc
+          `;
 
     return NextResponse.json({
       ok: true,
@@ -61,7 +193,7 @@ export async function GET() {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error obteniendo planes",
+        message: "Error obteniendo planes: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }
@@ -71,16 +203,9 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await requireGymAdmin();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (session.role !== "GYM_ADMIN") {
+    if (!session) {
       return NextResponse.json(
         {
           ok: false,
@@ -92,31 +217,13 @@ export async function POST(request: Request) {
 
     const body = await request.json();
 
-    const name = cleanString(body.name);
-    const durationDays = cleanNumber(body.durationDays);
-    const price = cleanNumber(body.price);
-    const schedule = cleanString(body.schedule);
+    const validation = validateMembershipPlanPayload(body, "create");
 
-    if (!name) {
-      return NextResponse.json(
-        { ok: false, message: "El nombre del plan es obligatorio" },
-        { status: 400 }
-      );
+    if (!validation.ok) {
+      return validationResponse(validation.errors);
     }
 
-    if (durationDays <= 0) {
-      return NextResponse.json(
-        { ok: false, message: "La duración debe ser mayor a 0 días" },
-        { status: 400 }
-      );
-    }
-
-    if (price < 0) {
-      return NextResponse.json(
-        { ok: false, message: "El precio no puede ser negativo" },
-        { status: 400 }
-      );
-    }
+    const { name, durationDays, price, schedule } = validation.data;
 
     const existingPlan = await sql`
       select id
@@ -128,7 +235,13 @@ export async function POST(request: Request) {
 
     if (existingPlan.length > 0) {
       return NextResponse.json(
-        { ok: false, message: "Ya existe un plan con ese nombre" },
+        {
+          ok: false,
+          message: "Ya existe un plan con ese nombre",
+          errors: {
+            name: "Ya existe un plan con ese nombre",
+          },
+        },
         { status: 409 }
       );
     }
@@ -172,7 +285,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error creando plan",
+        message: "Error creando plan: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }
@@ -182,16 +295,9 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await requireGymAdmin();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (session.role !== "GYM_ADMIN") {
+    if (!session) {
       return NextResponse.json(
         {
           ok: false,
@@ -202,43 +308,23 @@ export async function PATCH(request: Request) {
     }
 
     const url = new URL(request.url);
-    const planId = url.searchParams.get("planId");
+    const planIdValidation = validatePlanId(url.searchParams.get("planId"));
 
-    if (!planId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del plan" },
-        { status: 400 }
-      );
+    if (!planIdValidation.ok) {
+      return validationResponse(planIdValidation.errors);
     }
+
+    const planId = planIdValidation.planId;
 
     const body = await request.json();
 
-    const name = cleanString(body.name);
-    const durationDays = cleanNumber(body.durationDays);
-    const price = cleanNumber(body.price);
-    const schedule = cleanString(body.schedule);
-    const isActive = Boolean(body.isActive);
+    const validation = validateMembershipPlanPayload(body, "edit");
 
-    if (!name) {
-      return NextResponse.json(
-        { ok: false, message: "El nombre del plan es obligatorio" },
-        { status: 400 }
-      );
+    if (!validation.ok) {
+      return validationResponse(validation.errors);
     }
 
-    if (durationDays <= 0) {
-      return NextResponse.json(
-        { ok: false, message: "La duración debe ser mayor a 0 días" },
-        { status: 400 }
-      );
-    }
-
-    if (price < 0) {
-      return NextResponse.json(
-        { ok: false, message: "El precio no puede ser negativo" },
-        { status: 400 }
-      );
-    }
+    const { name, durationDays, price, schedule, isActive } = validation.data;
 
     const planExists = await sql`
       select id
@@ -266,7 +352,13 @@ export async function PATCH(request: Request) {
 
     if (duplicatedPlan.length > 0) {
       return NextResponse.json(
-        { ok: false, message: "Ya existe otro plan con ese nombre" },
+        {
+          ok: false,
+          message: "Ya existe otro plan con ese nombre",
+          errors: {
+            name: "Ya existe otro plan con ese nombre",
+          },
+        },
         { status: 409 }
       );
     }
@@ -303,7 +395,7 @@ export async function PATCH(request: Request) {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error editando plan",
+        message: "Error editando plan: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }
@@ -313,16 +405,9 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await requireGymAdmin();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (session.role !== "GYM_ADMIN") {
+    if (!session) {
       return NextResponse.json(
         {
           ok: false,
@@ -333,14 +418,13 @@ export async function DELETE(request: Request) {
     }
 
     const url = new URL(request.url);
-    const planId = url.searchParams.get("planId");
+    const planIdValidation = validatePlanId(url.searchParams.get("planId"));
 
-    if (!planId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del plan" },
-        { status: 400 }
-      );
+    if (!planIdValidation.ok) {
+      return validationResponse(planIdValidation.errors);
     }
+
+    const planId = planIdValidation.planId;
 
     const plan = await sql`
       select id, name
@@ -361,6 +445,7 @@ export async function DELETE(request: Request) {
       select id
       from memberships
       where plan_id = ${planId}
+        and gym_id = ${session.gymId}
       limit 1
     `;
 
@@ -379,6 +464,7 @@ export async function DELETE(request: Request) {
       select id
       from membership_requests
       where plan_id = ${planId}
+        and gym_id = ${session.gymId}
       limit 1
     `;
 
@@ -409,7 +495,7 @@ export async function DELETE(request: Request) {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error eliminando plan",
+        message: "Error eliminando plan: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }

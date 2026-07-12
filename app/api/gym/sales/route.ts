@@ -1,31 +1,75 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getCurrentSession } from "@/lib/session";
+import {
+  cleanString,
+  cleanNumber,
+  cleanInteger,
+  isValidUuid,
+  isValidDate,
+  type FieldErrors,
+} from "@/lib/validacion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type PaymentMethod = "CASH" | "CARD" | "TRANSFER" | "OTHER";
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Error desconocido";
 }
 
-function cleanString(value: unknown) {
-  return String(value || "").trim();
+function validationResponse(errors: FieldErrors) {
+  return NextResponse.json(
+    {
+      ok: false,
+      message: "Hay campos inválidos",
+      errors,
+    },
+    { status: 400 }
+  );
 }
 
-function cleanNumber(value: unknown) {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : 0;
-}
-
-function normalizePaymentMethod(value: string) {
-  const method = value.toUpperCase();
+function normalizePaymentMethod(value: unknown): PaymentMethod {
+  const method = cleanString(value).toUpperCase();
 
   if (["CASH", "CARD", "TRANSFER", "OTHER"].includes(method)) {
-    return method;
+    return method as PaymentMethod;
   }
 
   return "CASH";
+}
+
+function todayDateString() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function getAuthorizedSalesSession() {
+  const session = await getCurrentSession();
+
+  if (!session || !session.gymId) {
+    return null;
+  }
+
+  if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    return null;
+  }
+
+  return session;
+}
+
+async function requireGymAdmin() {
+  const session = await getCurrentSession();
+
+  if (!session || !session.gymId) {
+    return null;
+  }
+
+  if (session.role !== "GYM_ADMIN") {
+    return null;
+  }
+
+  return session;
 }
 
 async function prepareSalesDatabase() {
@@ -62,6 +106,16 @@ async function prepareSalesDatabase() {
   `;
 
   await sql`
+    alter table sale_items
+    add column if not exists gym_id uuid references gyms(id) on delete cascade,
+    add column if not exists product_id uuid references products(id) on delete set null,
+    add column if not exists quantity integer not null default 1,
+    add column if not exists unit_price numeric(10,2) not null default 0,
+    add column if not exists subtotal numeric(10,2) not null default 0,
+    add column if not exists created_at timestamptz not null default now()
+  `;
+
+  await sql`
     alter table inventory_movements
     add column if not exists gym_id uuid references gyms(id) on delete cascade,
     add column if not exists product_id uuid references products(id) on delete cascade,
@@ -87,18 +141,94 @@ async function prepareSalesDatabase() {
   `;
 }
 
+type SalePayload = {
+  productId: string;
+  quantity: number;
+  paymentMethod: PaymentMethod;
+  referenceCode: string;
+  notes: string;
+  saleDate: string;
+};
+
+function validateSalePayload(body: any) {
+  const data: SalePayload = {
+    productId: cleanString(body.productId),
+    quantity: cleanInteger(body.quantity),
+    paymentMethod: normalizePaymentMethod(body.paymentMethod),
+    referenceCode: cleanString(body.referenceCode),
+    notes: cleanString(body.notes),
+    saleDate: cleanString(body.saleDate) || todayDateString(),
+  };
+
+  const errors: FieldErrors = {};
+
+  if (!data.productId) {
+    errors.productId = "Selecciona un producto";
+  } else if (!isValidUuid(data.productId)) {
+    errors.productId = "ID de producto inválido";
+  }
+
+  if (data.quantity <= 0) {
+    errors.quantity = "La cantidad debe ser mayor a 0";
+  }
+
+  if (!Number.isInteger(data.quantity)) {
+    errors.quantity = "La cantidad debe ser un número entero";
+  }
+
+  if (!["CASH", "CARD", "TRANSFER", "OTHER"].includes(data.paymentMethod)) {
+    errors.paymentMethod = "Método de pago inválido";
+  }
+
+  if (!data.saleDate || !isValidDate(data.saleDate)) {
+    errors.saleDate = "Fecha de venta inválida";
+  }
+
+  if (
+    ["CARD", "TRANSFER"].includes(data.paymentMethod) &&
+    !data.referenceCode
+  ) {
+    errors.referenceCode =
+      "El código de referencia es obligatorio para pagos con tarjeta o transferencia";
+  }
+
+  if (data.referenceCode.length > 80) {
+    errors.referenceCode = "La referencia no puede superar 80 caracteres";
+  }
+
+  if (data.notes.length > 500) {
+    errors.notes = "Las notas no pueden superar 500 caracteres";
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    data,
+    errors,
+  };
+}
+
+function validateSaleId(value: string | null) {
+  const saleId = cleanString(value);
+  const errors: FieldErrors = {};
+
+  if (!saleId) {
+    errors.saleId = "Falta el ID de la venta";
+  } else if (!isValidUuid(saleId)) {
+    errors.saleId = "ID de venta inválido";
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    saleId,
+    errors,
+  };
+}
+
 export async function GET() {
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedSalesSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado" },
         { status: 403 }
@@ -112,7 +242,7 @@ export async function GET() {
         s.payment_method,
         s.reference_code,
         s.notes,
-        s.sale_date,
+        to_char(s.sale_date, 'YYYY-MM-DD') as sale_date,
         s.status,
         s.created_at,
         u.full_name as created_by_name,
@@ -155,49 +285,33 @@ export async function POST(request: Request) {
   try {
     await prepareSalesDatabase();
 
-    const session = await getCurrentSession();
+    const session = await getAuthorizedSalesSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    currentGymId = session.gymId;
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado para registrar ventas" },
         { status: 403 }
       );
     }
 
+    currentGymId = session.gymId;
+
     const body = await request.json();
 
-    const productId = cleanString(body.productId);
-    const quantity = Math.trunc(cleanNumber(body.quantity));
-    const paymentMethod = normalizePaymentMethod(
-      cleanString(body.paymentMethod)
-    );
-    const referenceCode = cleanString(body.referenceCode);
-    const notes = cleanString(body.notes);
-    const saleDate =
-      cleanString(body.saleDate) || new Date().toISOString().slice(0, 10);
+    const validation = validateSalePayload(body);
 
-    if (!productId) {
-      return NextResponse.json(
-        { ok: false, message: "Selecciona un producto" },
-        { status: 400 }
-      );
+    if (!validation.ok) {
+      return validationResponse(validation.errors);
     }
 
-    if (quantity <= 0) {
-      return NextResponse.json(
-        { ok: false, message: "La cantidad debe ser mayor a 0" },
-        { status: 400 }
-      );
-    }
+    const {
+      productId,
+      quantity,
+      paymentMethod,
+      referenceCode,
+      notes,
+      saleDate,
+    } = validation.data;
 
     const productResult = await sql`
       select
@@ -214,7 +328,13 @@ export async function POST(request: Request) {
 
     if (productResult.length === 0) {
       return NextResponse.json(
-        { ok: false, message: "Producto no encontrado" },
+        {
+          ok: false,
+          message: "Producto no encontrado",
+          errors: {
+            productId: "Producto no encontrado",
+          },
+        },
         { status: 404 }
       );
     }
@@ -223,7 +343,13 @@ export async function POST(request: Request) {
 
     if (!product.is_active) {
       return NextResponse.json(
-        { ok: false, message: "El producto está inactivo" },
+        {
+          ok: false,
+          message: "El producto está inactivo",
+          errors: {
+            productId: "El producto está inactivo",
+          },
+        },
         { status: 400 }
       );
     }
@@ -232,9 +358,28 @@ export async function POST(request: Request) {
     const unitPrice = Number(product.price || 0);
     const total = unitPrice * quantity;
 
+    if (unitPrice < 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          message: "El producto tiene un precio inválido",
+          errors: {
+            productId: "El producto tiene un precio inválido",
+          },
+        },
+        { status: 400 }
+      );
+    }
+
     if (currentStock <= 0) {
       return NextResponse.json(
-        { ok: false, message: "Este producto no tiene stock disponible" },
+        {
+          ok: false,
+          message: "Este producto no tiene stock disponible",
+          errors: {
+            quantity: "Este producto no tiene stock disponible",
+          },
+        },
         { status: 400 }
       );
     }
@@ -244,6 +389,9 @@ export async function POST(request: Request) {
         {
           ok: false,
           message: `Stock insuficiente. Disponible: ${currentStock}`,
+          errors: {
+            quantity: `Stock insuficiente. Disponible: ${currentStock}`,
+          },
         },
         { status: 400 }
       );
@@ -258,7 +406,9 @@ export async function POST(request: Request) {
         notes,
         sale_date,
         status,
-        created_by
+        created_by,
+        created_at,
+        updated_at
       )
       values (
         ${session.gymId},
@@ -268,7 +418,9 @@ export async function POST(request: Request) {
         ${notes || null},
         ${saleDate},
         'COMPLETED',
-        ${session.userId}
+        ${session.userId},
+        now(),
+        now()
       )
       returning
         id,
@@ -277,7 +429,7 @@ export async function POST(request: Request) {
         payment_method,
         reference_code,
         notes,
-        sale_date,
+        to_char(sale_date, 'YYYY-MM-DD') as sale_date,
         status,
         created_at
     `;
@@ -291,7 +443,8 @@ export async function POST(request: Request) {
         product_id,
         quantity,
         unit_price,
-        subtotal
+        subtotal,
+        created_at
       )
       values (
         ${createdSaleId},
@@ -299,20 +452,29 @@ export async function POST(request: Request) {
         ${productId},
         ${quantity},
         ${unitPrice},
-        ${total}
+        ${total},
+        now()
       )
     `;
 
     const newStock = currentStock - quantity;
 
-    await sql`
+    const updatedProduct = await sql`
       update products
       set
         stock = ${newStock},
         updated_at = now()
       where id = ${productId}
         and gym_id = ${session.gymId}
+        and stock >= ${quantity}
+      returning id, stock
     `;
+
+    if (updatedProduct.length === 0) {
+      throw new Error(
+        "No se pudo actualizar el stock. Posiblemente el stock cambió mientras se registraba la venta."
+      );
+    }
 
     await sql`
       insert into inventory_movements (
@@ -323,7 +485,8 @@ export async function POST(request: Request) {
         previous_stock,
         new_stock,
         reason,
-        created_by
+        created_by,
+        created_at
       )
       values (
         ${session.gymId},
@@ -333,7 +496,8 @@ export async function POST(request: Request) {
         ${currentStock},
         ${newStock},
         ${"Venta registrada: " + product.name},
-        ${session.userId}
+        ${session.userId},
+        now()
       )
     `;
 
@@ -372,16 +536,9 @@ export async function DELETE(request: Request) {
   try {
     await prepareSalesDatabase();
 
-    const session = await getCurrentSession();
+    const session = await requireGymAdmin();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (session.role !== "GYM_ADMIN") {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "Solo el administrador puede cancelar ventas" },
         { status: 403 }
@@ -389,14 +546,13 @@ export async function DELETE(request: Request) {
     }
 
     const url = new URL(request.url);
-    const saleId = url.searchParams.get("saleId");
+    const saleIdValidation = validateSaleId(url.searchParams.get("saleId"));
 
-    if (!saleId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID de la venta" },
-        { status: 400 }
-      );
+    if (!saleIdValidation.ok) {
+      return validationResponse(saleIdValidation.errors);
     }
+
+    const saleId = saleIdValidation.saleId;
 
     const sale = await sql`
       select
@@ -417,7 +573,13 @@ export async function DELETE(request: Request) {
 
     if (String(sale[0].status) === "CANCELLED") {
       return NextResponse.json(
-        { ok: false, message: "Esta venta ya fue cancelada" },
+        {
+          ok: false,
+          message: "Esta venta ya fue cancelada",
+          errors: {
+            saleId: "Esta venta ya fue cancelada",
+          },
+        },
         { status: 400 }
       );
     }
@@ -436,7 +598,8 @@ export async function DELETE(request: Request) {
 
     for (const item of items) {
       const previousStock = Number(item.current_stock || 0);
-      const restoredStock = previousStock + Number(item.quantity || 0);
+      const quantity = Number(item.quantity || 0);
+      const restoredStock = previousStock + quantity;
 
       await sql`
         update products
@@ -456,17 +619,19 @@ export async function DELETE(request: Request) {
           previous_stock,
           new_stock,
           reason,
-          created_by
+          created_by,
+          created_at
         )
         values (
           ${session.gymId},
           ${item.product_id},
           'IN',
-          ${item.quantity},
+          ${quantity},
           ${previousStock},
           ${restoredStock},
           ${"Cancelación de venta: " + item.product_name},
-          ${session.userId}
+          ${session.userId},
+          now()
         )
       `;
     }

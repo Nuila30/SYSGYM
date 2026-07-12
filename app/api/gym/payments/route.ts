@@ -1,45 +1,163 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getCurrentSession } from "@/lib/session";
+import {
+  cleanString,
+  cleanNumber,
+  isValidUuid,
+  isValidDate,
+  type FieldErrors,
+} from "@/lib/validacion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type PaymentMethod = "CASH" | "CARD" | "TRANSFER" | "OTHER";
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Error desconocido";
 }
 
-function cleanString(value: unknown) {
-  return String(value || "").trim();
+function validationResponse(errors: FieldErrors) {
+  return NextResponse.json(
+    {
+      ok: false,
+      message: "Hay campos inválidos",
+      errors,
+    },
+    { status: 400 }
+  );
 }
 
-function cleanNumber(value: unknown) {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : 0;
+function todayDateString() {
+  return new Date().toISOString().slice(0, 10);
 }
 
-function normalizePaymentMethod(value: string) {
-  const method = value.toUpperCase();
+function normalizePaymentMethod(value: unknown): PaymentMethod {
+  const method = cleanString(value).toUpperCase();
 
   if (["CASH", "CARD", "TRANSFER", "OTHER"].includes(method)) {
-    return method;
+    return method as PaymentMethod;
   }
 
   return "CASH";
 }
 
+async function getAuthorizedPaymentsSession() {
+  const session = await getCurrentSession();
+
+  if (!session || !session.gymId) {
+    return null;
+  }
+
+  if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    return null;
+  }
+
+  return session;
+}
+
+async function requireGymAdmin() {
+  const session = await getCurrentSession();
+
+  if (!session || !session.gymId) {
+    return null;
+  }
+
+  if (session.role !== "GYM_ADMIN") {
+    return null;
+  }
+
+  return session;
+}
+
+function validatePaymentId(value: string | null) {
+  const paymentId = cleanString(value);
+  const errors: FieldErrors = {};
+
+  if (!paymentId) {
+    errors.paymentId = "Falta el ID del pago";
+  } else if (!isValidUuid(paymentId)) {
+    errors.paymentId = "ID de pago inválido";
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    paymentId,
+    errors,
+  };
+}
+
+type PaymentPayload = {
+  membershipId: string;
+  amount: number;
+  method: PaymentMethod;
+  referenceCode: string;
+  notes: string;
+  paymentDate: string;
+};
+
+function validatePaymentPayload(body: any) {
+  const rawMethod = body.paymentMethod ?? body.method;
+
+  const data: PaymentPayload = {
+    membershipId: cleanString(body.membershipId),
+    amount: cleanNumber(body.amount),
+    method: normalizePaymentMethod(rawMethod),
+    referenceCode: cleanString(body.referenceCode),
+    notes: cleanString(body.notes),
+    paymentDate: cleanString(body.paymentDate) || todayDateString(),
+  };
+
+  const errors: FieldErrors = {};
+
+  if (!data.membershipId) {
+    errors.membershipId = "Selecciona una membresía";
+  } else if (!isValidUuid(data.membershipId)) {
+    errors.membershipId = "ID de membresía inválido";
+  }
+
+  if (data.amount <= 0) {
+    errors.amount = "El monto debe ser mayor a 0";
+  }
+
+  if (data.amount > 999999) {
+    errors.amount = "El monto es demasiado alto";
+  }
+
+  if (!["CASH", "CARD", "TRANSFER", "OTHER"].includes(data.method)) {
+    errors.paymentMethod = "Método de pago inválido";
+  }
+
+  if (!data.paymentDate || !isValidDate(data.paymentDate)) {
+    errors.paymentDate = "Fecha de pago inválida";
+  }
+
+  if (["CARD", "TRANSFER"].includes(data.method) && !data.referenceCode) {
+    errors.referenceCode =
+      "El código de referencia es obligatorio para pagos con tarjeta o transferencia";
+  }
+
+  if (data.referenceCode.length > 80) {
+    errors.referenceCode = "La referencia no puede superar 80 caracteres";
+  }
+
+  if (data.notes.length > 500) {
+    errors.notes = "Las notas no pueden superar 500 caracteres";
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    data,
+    errors,
+  };
+}
+
 export async function GET() {
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedPaymentsSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado" },
         { status: 403 }
@@ -56,9 +174,10 @@ export async function GET() {
         p.method,
         p.reference_code,
         p.notes,
-        p.payment_date,
+        to_char(p.payment_date, 'YYYY-MM-DD') as payment_date,
         p.status,
         p.created_at,
+        p.updated_at,
         u.full_name as member_name,
         u.username,
         mp.name as plan_name
@@ -80,7 +199,7 @@ export async function GET() {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error obteniendo pagos",
+        message: "Error obteniendo pagos: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }
@@ -90,16 +209,9 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedPaymentsSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado para registrar pagos" },
         { status: 403 }
@@ -108,33 +220,21 @@ export async function POST(request: Request) {
 
     const body = await request.json();
 
-    const membershipId = cleanString(body.membershipId);
-    const amount = cleanNumber(body.amount);
-    const method = normalizePaymentMethod(cleanString(body.paymentMethod));
-    const referenceCode = cleanString(body.referenceCode);
-    const notes = cleanString(body.notes);
-    const paymentDate =
-      cleanString(body.paymentDate) || new Date().toISOString().slice(0, 10);
+    const validation = validatePaymentPayload(body);
 
-    if (!membershipId) {
-      return NextResponse.json(
-        { ok: false, message: "Selecciona una membresía" },
-        { status: 400 }
-      );
+    if (!validation.ok) {
+      return validationResponse(validation.errors);
     }
 
-    if (amount <= 0) {
-      return NextResponse.json(
-        { ok: false, message: "El monto debe ser mayor a 0" },
-        { status: 400 }
-      );
-    }
+    const { membershipId, amount, method, referenceCode, notes, paymentDate } =
+      validation.data;
 
     const membership = await sql`
       select
         m.id,
         m.member_id,
         m.gym_id,
+        m.status::text as status,
         u.full_name as member_name
       from memberships m
       join users u on u.id = m.member_id
@@ -145,8 +245,27 @@ export async function POST(request: Request) {
 
     if (membership.length === 0) {
       return NextResponse.json(
-        { ok: false, message: "Membresía no encontrada" },
+        {
+          ok: false,
+          message: "Membresía no encontrada",
+          errors: {
+            membershipId: "Membresía no encontrada",
+          },
+        },
         { status: 404 }
+      );
+    }
+
+    if (String(membership[0].status) === "CANCELLED") {
+      return NextResponse.json(
+        {
+          ok: false,
+          message: "No puedes registrar pago a una membresía cancelada",
+          errors: {
+            membershipId: "No puedes registrar pago a una membresía cancelada",
+          },
+        },
+        { status: 400 }
       );
     }
 
@@ -161,7 +280,9 @@ export async function POST(request: Request) {
         notes,
         payment_date,
         status,
-        created_by
+        created_by,
+        created_at,
+        updated_at
       )
       values (
         ${session.gymId},
@@ -173,7 +294,9 @@ export async function POST(request: Request) {
         ${notes || null},
         ${paymentDate},
         'PAID',
-        ${session.userId}
+        ${session.userId},
+        now(),
+        now()
       )
       returning
         id,
@@ -184,9 +307,10 @@ export async function POST(request: Request) {
         method,
         reference_code,
         notes,
-        payment_date,
+        to_char(payment_date, 'YYYY-MM-DD') as payment_date,
         status,
-        created_at
+        created_at,
+        updated_at
     `;
 
     return NextResponse.json({
@@ -200,7 +324,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error registrando pago",
+        message: "Error registrando pago: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }
@@ -210,16 +334,9 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await requireGymAdmin();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (session.role !== "GYM_ADMIN") {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "Solo el administrador puede editar pagos" },
         { status: 403 }
@@ -227,38 +344,26 @@ export async function PATCH(request: Request) {
     }
 
     const url = new URL(request.url);
-    const paymentId = url.searchParams.get("paymentId");
+    const paymentIdValidation = validatePaymentId(
+      url.searchParams.get("paymentId")
+    );
 
-    if (!paymentId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del pago" },
-        { status: 400 }
-      );
+    if (!paymentIdValidation.ok) {
+      return validationResponse(paymentIdValidation.errors);
     }
+
+    const paymentId = paymentIdValidation.paymentId;
 
     const body = await request.json();
 
-    const membershipId = cleanString(body.membershipId);
-    const amount = cleanNumber(body.amount);
-    const method = normalizePaymentMethod(cleanString(body.paymentMethod));
-    const referenceCode = cleanString(body.referenceCode);
-    const notes = cleanString(body.notes);
-    const paymentDate =
-      cleanString(body.paymentDate) || new Date().toISOString().slice(0, 10);
+    const validation = validatePaymentPayload(body);
 
-    if (!membershipId) {
-      return NextResponse.json(
-        { ok: false, message: "Selecciona una membresía" },
-        { status: 400 }
-      );
+    if (!validation.ok) {
+      return validationResponse(validation.errors);
     }
 
-    if (amount <= 0) {
-      return NextResponse.json(
-        { ok: false, message: "El monto debe ser mayor a 0" },
-        { status: 400 }
-      );
-    }
+    const { membershipId, amount, method, referenceCode, notes, paymentDate } =
+      validation.data;
 
     const existingPayment = await sql`
       select id
@@ -276,7 +381,10 @@ export async function PATCH(request: Request) {
     }
 
     const membership = await sql`
-      select id, member_id
+      select
+        id,
+        member_id,
+        status::text as status
       from memberships
       where id = ${membershipId}
         and gym_id = ${session.gymId}
@@ -285,8 +393,27 @@ export async function PATCH(request: Request) {
 
     if (membership.length === 0) {
       return NextResponse.json(
-        { ok: false, message: "Membresía no encontrada" },
+        {
+          ok: false,
+          message: "Membresía no encontrada",
+          errors: {
+            membershipId: "Membresía no encontrada",
+          },
+        },
         { status: 404 }
+      );
+    }
+
+    if (String(membership[0].status) === "CANCELLED") {
+      return NextResponse.json(
+        {
+          ok: false,
+          message: "No puedes asignar el pago a una membresía cancelada",
+          errors: {
+            membershipId: "No puedes asignar el pago a una membresía cancelada",
+          },
+        },
+        { status: 400 }
       );
     }
 
@@ -312,9 +439,10 @@ export async function PATCH(request: Request) {
         method,
         reference_code,
         notes,
-        payment_date,
+        to_char(payment_date, 'YYYY-MM-DD') as payment_date,
         status,
-        created_at
+        created_at,
+        updated_at
     `;
 
     return NextResponse.json({
@@ -328,7 +456,7 @@ export async function PATCH(request: Request) {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error editando pago",
+        message: "Error editando pago: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }
@@ -338,16 +466,9 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await requireGymAdmin();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (session.role !== "GYM_ADMIN") {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "Solo el administrador puede eliminar pagos" },
         { status: 403 }
@@ -355,14 +476,15 @@ export async function DELETE(request: Request) {
     }
 
     const url = new URL(request.url);
-    const paymentId = url.searchParams.get("paymentId");
+    const paymentIdValidation = validatePaymentId(
+      url.searchParams.get("paymentId")
+    );
 
-    if (!paymentId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del pago" },
-        { status: 400 }
-      );
+    if (!paymentIdValidation.ok) {
+      return validationResponse(paymentIdValidation.errors);
     }
+
+    const paymentId = paymentIdValidation.paymentId;
 
     const payment = await sql`
       select id
@@ -395,7 +517,7 @@ export async function DELETE(request: Request) {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error eliminando pago",
+        message: "Error eliminando pago: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getCurrentSession } from "@/lib/session";
+import { cleanString, type FieldErrors } from "@/lib/validacion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,33 +10,77 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Error desconocido";
 }
 
-function cleanString(value: unknown) {
-  return String(value || "").trim();
+function validationResponse(errors: FieldErrors) {
+  return NextResponse.json(
+    {
+      ok: false,
+      message: "Hay campos inválidos",
+      errors,
+    },
+    { status: 400 }
+  );
 }
 
-function extractToken(value: string) {
-  const cleanValue = value.trim();
+function extractToken(value: unknown) {
+  const cleanValue = cleanString(value);
+
+  if (!cleanValue) return "";
 
   try {
     const url = new URL(cleanValue);
-    return url.searchParams.get("token") || "";
+    return cleanString(url.searchParams.get("token"));
   } catch {
+    const match = cleanValue.match(/[?&]token=([^&]+)/);
+
+    if (match?.[1]) {
+      return cleanString(decodeURIComponent(match[1]));
+    }
+
     return cleanValue;
   }
 }
 
+function validateQrPayload(body: any) {
+  const token = extractToken(body.token);
+
+  const errors: FieldErrors = {};
+
+  if (!token) {
+    errors.token = "QR no válido";
+  } else if (token.length < 20) {
+    errors.token = "El token del QR parece incompleto";
+  } else if (!/^[a-zA-Z0-9_-]+$/.test(token)) {
+    errors.token = "El token del QR contiene caracteres inválidos";
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    data: {
+      token,
+    },
+    errors,
+  };
+}
+
+async function getAuthorizedSession() {
+  const session = await getCurrentSession();
+
+  if (!session || !session.gymId) {
+    return null;
+  }
+
+  if (!["GYM_ADMIN", "EMPLOYEE", "MEMBER"].includes(session.role)) {
+    return null;
+  }
+
+  return session;
+}
+
 export async function POST(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE", "MEMBER"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado para marcar asistencia" },
         { status: 403 }
@@ -44,15 +89,13 @@ export async function POST(request: Request) {
 
     const body = await request.json();
 
-    const scannedValue = cleanString(body.token);
-    const token = extractToken(scannedValue);
+    const validation = validateQrPayload(body);
 
-    if (!token) {
-      return NextResponse.json(
-        { ok: false, message: "QR no válido" },
-        { status: 400 }
-      );
+    if (!validation.ok) {
+      return validationResponse(validation.errors);
     }
+
+    const { token } = validation.data;
 
     const qrToken = await sql`
       select
@@ -72,6 +115,9 @@ export async function POST(request: Request) {
         {
           ok: false,
           message: "Este QR no pertenece a tu gimnasio o ya no está activo",
+          errors: {
+            token: "Este QR no pertenece a tu gimnasio o ya no está activo",
+          },
         },
         { status: 403 }
       );
@@ -81,8 +127,8 @@ export async function POST(request: Request) {
       select
         id,
         full_name,
-        role,
-        status
+        role::text as role,
+        status::text as status
       from users
       where id = ${session.userId}
         and gym_id = ${session.gymId}
@@ -91,14 +137,22 @@ export async function POST(request: Request) {
 
     if (userResult.length === 0) {
       return NextResponse.json(
-        { ok: false, message: "Usuario no encontrado en este gimnasio" },
+        {
+          ok: false,
+          message: "Usuario no encontrado en este gimnasio",
+        },
         { status: 404 }
       );
     }
 
-    if (userResult[0].status !== "ACTIVE") {
+    const user = userResult[0];
+
+    if (String(user.status) !== "ACTIVE") {
       return NextResponse.json(
-        { ok: false, message: "Tu usuario no está activo" },
+        {
+          ok: false,
+          message: "Tu usuario no está activo",
+        },
         { status: 403 }
       );
     }
@@ -116,7 +170,7 @@ export async function POST(request: Request) {
         attendance_date,
         check_in_at,
         check_out_at,
-        status
+        status::text as status
       from attendance_logs
       where gym_id = ${session.gymId}
         and user_id = ${session.userId}
@@ -132,7 +186,9 @@ export async function POST(request: Request) {
           attendance_date,
           check_in_at,
           qr_token,
-          status
+          status,
+          created_at,
+          updated_at
         )
         values (
           ${session.gymId},
@@ -140,13 +196,15 @@ export async function POST(request: Request) {
           ${today},
           now(),
           ${token},
-          'OPEN'
+          'OPEN',
+          now(),
+          now()
         )
         returning
           id,
-          attendance_date,
-          check_in_at,
-          check_out_at,
+          to_char(attendance_date, 'YYYY-MM-DD') as attendance_date,
+          to_char(check_in_at at time zone 'America/El_Salvador', 'HH24:MI') as check_in_time,
+          to_char(check_out_at at time zone 'America/El_Salvador', 'HH24:MI') as check_out_time,
           status
       `;
 
@@ -169,13 +227,26 @@ export async function POST(request: Request) {
           updated_at = now()
         where id = ${attendance.id}
           and gym_id = ${session.gymId}
+          and user_id = ${session.userId}
+          and check_out_at is null
         returning
           id,
-          attendance_date,
-          check_in_at,
-          check_out_at,
+          to_char(attendance_date, 'YYYY-MM-DD') as attendance_date,
+          to_char(check_in_at at time zone 'America/El_Salvador', 'HH24:MI') as check_in_time,
+          to_char(check_out_at at time zone 'America/El_Salvador', 'HH24:MI') as check_out_time,
           status
       `;
+
+      if (updatedAttendance.length === 0) {
+        return NextResponse.json(
+          {
+            ok: false,
+            action: "COMPLETED",
+            message: "La salida ya fue registrada",
+          },
+          { status: 409 }
+        );
+      }
 
       return NextResponse.json({
         ok: true,
@@ -190,7 +261,11 @@ export async function POST(request: Request) {
         ok: false,
         action: "COMPLETED",
         message: "Ya registraste entrada y salida para la fecha de hoy",
-        attendance,
+        attendance: {
+          id: attendance.id,
+          attendance_date: attendance.attendance_date,
+          status: attendance.status,
+        },
       },
       { status: 409 }
     );
@@ -200,7 +275,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error marcando asistencia",
+        message: "Error marcando asistencia: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }

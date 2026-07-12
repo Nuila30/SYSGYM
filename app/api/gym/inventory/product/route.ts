@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getCurrentSession } from "@/lib/session";
+import {
+  cleanString,
+  cleanNumber,
+  cleanInteger,
+  isValidUuid,
+  isValidUrlOrPath,
+  isValidDate,
+  type FieldErrors,
+} from "@/lib/validacion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,32 +18,93 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Error desconocido";
 }
 
-function cleanString(value: unknown) {
-  return String(value || "").trim();
+function validationResponse(errors: FieldErrors) {
+  return NextResponse.json(
+    {
+      ok: false,
+      message: "Hay campos inválidos",
+      errors,
+    },
+    { status: 400 }
+  );
 }
 
-function cleanNumber(value: unknown) {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : 0;
+async function getAuthorizedSession() {
+  const session = await getCurrentSession();
+
+  if (!session || !session.gymId) {
+    return null;
+  }
+
+  if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    return null;
+  }
+
+  return session;
 }
 
-function cleanInteger(value: unknown) {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? Math.trunc(numberValue) : 0;
+type InventoryProductPayload = {
+  productId: string;
+  name: string;
+  imageUrl: string;
+  price: number;
+  stock: number;
+  stockEntryDate: string;
+};
+
+function validateInventoryProductPayload(body: any) {
+  const data: InventoryProductPayload = {
+    productId: cleanString(body.productId),
+    name: cleanString(body.name),
+    imageUrl: cleanString(body.imageUrl),
+    price: cleanNumber(body.price),
+    stock: cleanInteger(body.stock),
+    stockEntryDate: cleanString(body.stockEntryDate),
+  };
+
+  const errors: FieldErrors = {};
+
+  if (!data.productId) {
+    errors.productId = "Falta el ID del producto";
+  } else if (!isValidUuid(data.productId)) {
+    errors.productId = "ID de producto inválido";
+  }
+
+  if (!data.name) {
+    errors.name = "El nombre del producto es obligatorio";
+  } else if (data.name.length < 2) {
+    errors.name = "El nombre debe tener mínimo 2 caracteres";
+  }
+
+  if (data.imageUrl && !isValidUrlOrPath(data.imageUrl)) {
+    errors.imageUrl =
+      "La imagen debe ser una URL válida o una ruta como /images/producto.png";
+  }
+
+  if (data.price < 0) {
+    errors.price = "El precio no puede ser negativo";
+  }
+
+  if (data.stock < 0) {
+    errors.stock = "El stock no puede ser negativo";
+  }
+
+  if (data.stockEntryDate && !isValidDate(data.stockEntryDate)) {
+    errors.stockEntryDate = "Fecha de ingreso inválida";
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    data,
+    errors,
+  };
 }
 
 export async function PATCH(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado para editar inventario" },
         { status: 403 }
@@ -43,40 +113,14 @@ export async function PATCH(request: Request) {
 
     const body = await request.json();
 
-    const productId = cleanString(body.productId);
-    const name = cleanString(body.name);
-    const imageUrl = cleanString(body.imageUrl);
-    const price = cleanNumber(body.price);
-    const stock = cleanInteger(body.stock);
-    const stockEntryDate = cleanString(body.stockEntryDate);
+    const validation = validateInventoryProductPayload(body);
 
-    if (!productId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del producto" },
-        { status: 400 }
-      );
+    if (!validation.ok) {
+      return validationResponse(validation.errors);
     }
 
-    if (!name) {
-      return NextResponse.json(
-        { ok: false, message: "El nombre del producto es obligatorio" },
-        { status: 400 }
-      );
-    }
-
-    if (price < 0) {
-      return NextResponse.json(
-        { ok: false, message: "El precio no puede ser negativo" },
-        { status: 400 }
-      );
-    }
-
-    if (stock < 0) {
-      return NextResponse.json(
-        { ok: false, message: "El stock no puede ser negativo" },
-        { status: 400 }
-      );
-    }
+    const { productId, name, imageUrl, price, stock, stockEntryDate } =
+      validation.data;
 
     const productResult = await sql`
       select
@@ -107,12 +151,19 @@ export async function PATCH(request: Request) {
 
     if (duplicate.length > 0) {
       return NextResponse.json(
-        { ok: false, message: "Ya existe otro producto con ese nombre" },
+        {
+          ok: false,
+          message: "Ya existe otro producto con ese nombre",
+          errors: {
+            name: "Ya existe otro producto con ese nombre",
+          },
+        },
         { status: 409 }
       );
     }
 
     const previousStock = Number(productResult[0].stock || 0);
+    const stockDifference = Math.abs(stock - previousStock);
 
     const product = await sql`
       update products
@@ -127,12 +178,16 @@ export async function PATCH(request: Request) {
         and gym_id = ${session.gymId}
       returning
         id,
+        gym_id,
         name,
         image_url,
         price,
         stock,
-        stock_entry_date,
-        is_active
+        min_stock,
+        to_char(stock_entry_date, 'YYYY-MM-DD') as stock_entry_date,
+        is_active,
+        created_at,
+        updated_at
     `;
 
     if (previousStock !== stock) {
@@ -145,17 +200,19 @@ export async function PATCH(request: Request) {
           previous_stock,
           new_stock,
           reason,
-          created_by
+          created_by,
+          created_at
         )
         values (
           ${session.gymId},
           ${productId},
           'ADJUSTMENT',
-          ${stock},
+          ${stockDifference},
           ${previousStock},
           ${stock},
           'Actualización desde inventario',
-          ${session.userId}
+          ${session.userId},
+          now()
         )
       `;
     }
@@ -171,7 +228,8 @@ export async function PATCH(request: Request) {
     return NextResponse.json(
       {
         ok: false,
-        message: "Error actualizando producto e inventario",
+        message:
+          "Error actualizando producto e inventario: " + getErrorMessage(error),
         error: getErrorMessage(error),
       },
       { status: 500 }

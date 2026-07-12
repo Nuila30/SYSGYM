@@ -8,6 +8,13 @@ import {
   getTemporaryPasswordExpiration,
 } from "@/lib/credentials";
 import { sendCredentialsEmail } from "@/lib/mail";
+import {
+  cleanString,
+  cleanEmail,
+  isValidUuid,
+  validateGymUserPayload,
+  type FieldErrors,
+} from "@/lib/validacion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,22 +23,76 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Error desconocido";
 }
 
-function cleanString(value: unknown) {
-  return String(value || "").trim();
+function validationResponse(errors: FieldErrors) {
+  return NextResponse.json(
+    {
+      ok: false,
+      message: "Hay campos inválidos",
+      errors,
+    },
+    { status: 400 }
+  );
 }
 
-function cleanEmail(value: unknown) {
-  return String(value || "").trim().toLowerCase();
+function normalizeRole(value: unknown) {
+  return cleanString(value).toUpperCase();
 }
 
-function normalizeRole(value: string) {
-  const role = value.toUpperCase();
+function normalizeStatus(value: unknown) {
+  return cleanString(value || "ACTIVE").toUpperCase();
+}
 
-  if (["GYM_ADMIN", "EMPLOYEE", "MEMBER"].includes(role)) {
-    return role;
+function validateUserId(value: string | null) {
+  const userId = cleanString(value);
+  const errors: FieldErrors = {};
+
+  if (!userId) {
+    errors.userId = "Falta el ID del usuario";
+  } else if (!isValidUuid(userId)) {
+    errors.userId = "ID de usuario inválido";
   }
 
-  return "MEMBER";
+  return {
+    ok: Object.keys(errors).length === 0,
+    userId,
+    errors,
+  };
+}
+
+function validateUserBody(body: any, mode: "create" | "edit") {
+  const validation = validateGymUserPayload(body);
+  const errors: FieldErrors = {
+    ...validation.errors,
+  };
+
+  const rawRole = normalizeRole(body.role);
+  const rawStatus = normalizeStatus(body.status);
+
+  if (!["EMPLOYEE", "MEMBER", "GYM_ADMIN"].includes(rawRole)) {
+    errors.role = "Rol inválido";
+  }
+
+  if (mode === "edit" && !["ACTIVE", "INACTIVE"].includes(rawStatus)) {
+    errors.status = "Estado inválido";
+  }
+
+  if (!validation.data) {
+    return {
+      ok: false,
+      data: null,
+      errors,
+    };
+  }
+
+  return {
+    ok: Object.keys(errors).length === 0,
+    data: {
+      ...validation.data,
+      role: rawRole as "GYM_ADMIN" | "EMPLOYEE" | "MEMBER",
+      status: rawStatus as "ACTIVE" | "INACTIVE",
+    },
+    errors,
+  };
 }
 
 function canManageTargetRole(currentRole: string, targetRole: string) {
@@ -46,18 +107,25 @@ function canManageTargetRole(currentRole: string, targetRole: string) {
   return false;
 }
 
+async function getAuthorizedGymSession() {
+  const session = await getCurrentSession();
+
+  if (!session || !session.gymId) {
+    return null;
+  }
+
+  if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    return null;
+  }
+
+  return session;
+}
+
 export async function GET() {
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedGymSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado" },
         { status: 403 }
@@ -74,8 +142,8 @@ export async function GET() {
               username,
               email,
               phone,
-              role,
-              status,
+              role::text as role,
+              status::text as status,
               must_change_password,
               temp_password_expires_at,
               credentials_email_sent_at,
@@ -100,8 +168,8 @@ export async function GET() {
               username,
               email,
               phone,
-              role,
-              status,
+              role::text as role,
+              status::text as status,
               must_change_password,
               temp_password_expires_at,
               credentials_email_sent_at,
@@ -135,16 +203,9 @@ export async function POST(request: Request) {
   let createdUserId: string | null = null;
 
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedGymSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado para crear usuarios" },
         { status: 403 }
@@ -153,35 +214,23 @@ export async function POST(request: Request) {
 
     const body = await request.json();
 
-    const fullName = cleanString(body.fullName);
-    const email = cleanEmail(body.email);
-    const phone = cleanString(body.phone);
-    const role = normalizeRole(cleanString(body.role));
+    const validation = validateUserBody(body, "create");
 
-    if (!fullName) {
-      return NextResponse.json(
-        { ok: false, message: "El nombre completo es obligatorio" },
-        { status: 400 }
-      );
+    if (!validation.ok || !validation.data) {
+      return validationResponse(validation.errors);
     }
 
-    if (!phone) {
-      return NextResponse.json(
-        { ok: false, message: "El teléfono es obligatorio" },
-        { status: 400 }
-      );
-    }
-
-    if (!email) {
-      return NextResponse.json(
-        { ok: false, message: "El correo es obligatorio" },
-        { status: 400 }
-      );
-    }
+    const { fullName, email, phone, role } = validation.data;
 
     if (!canManageTargetRole(session.role, role)) {
       return NextResponse.json(
-        { ok: false, message: "No tienes permiso para crear ese tipo de usuario" },
+        {
+          ok: false,
+          message: "No tienes permiso para crear ese tipo de usuario",
+          errors: {
+            role: "No tienes permiso para crear ese tipo de usuario",
+          },
+        },
         { status: 403 }
       );
     }
@@ -195,7 +244,13 @@ export async function POST(request: Request) {
 
     if (duplicateEmail.length > 0) {
       return NextResponse.json(
-        { ok: false, message: "Ya existe un usuario con ese correo" },
+        {
+          ok: false,
+          message: "Ya existe un usuario con ese correo",
+          errors: {
+            email: "Ya existe un usuario con ese correo",
+          },
+        },
         { status: 409 }
       );
     }
@@ -307,16 +362,9 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedGymSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado para editar usuarios" },
         { status: 403 }
@@ -324,39 +372,26 @@ export async function PATCH(request: Request) {
     }
 
     const url = new URL(request.url);
-    const userId = url.searchParams.get("userId");
+    const userIdValidation = validateUserId(url.searchParams.get("userId"));
 
-    if (!userId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del usuario" },
-        { status: 400 }
-      );
+    if (!userIdValidation.ok) {
+      return validationResponse(userIdValidation.errors);
     }
+
+    const userId = userIdValidation.userId;
 
     const body = await request.json();
 
-    const fullName = cleanString(body.fullName);
-    const email = cleanEmail(body.email);
-    const phone = cleanString(body.phone);
-    const role = normalizeRole(cleanString(body.role));
-    const status = cleanString(body.status).toUpperCase() || "ACTIVE";
+    const validation = validateUserBody(body, "edit");
 
-    if (!fullName || !email || !phone) {
-      return NextResponse.json(
-        { ok: false, message: "Nombre, correo y teléfono son obligatorios" },
-        { status: 400 }
-      );
+    if (!validation.ok || !validation.data) {
+      return validationResponse(validation.errors);
     }
 
-    if (!["ACTIVE", "INACTIVE"].includes(status)) {
-      return NextResponse.json(
-        { ok: false, message: "Estado no válido" },
-        { status: 400 }
-      );
-    }
+    const { fullName, email, phone, role, status } = validation.data;
 
     const targetUser = await sql`
-      select id, role, gym_id
+      select id, role::text as role, gym_id
       from users
       where id = ${userId}
         and gym_id = ${session.gymId}
@@ -379,7 +414,13 @@ export async function PATCH(request: Request) {
 
     if (!canManageTargetRole(session.role, role)) {
       return NextResponse.json(
-        { ok: false, message: "No puedes asignar ese rol" },
+        {
+          ok: false,
+          message: "No puedes asignar ese rol",
+          errors: {
+            role: "No puedes asignar ese rol",
+          },
+        },
         { status: 403 }
       );
     }
@@ -394,7 +435,13 @@ export async function PATCH(request: Request) {
 
     if (duplicateEmail.length > 0) {
       return NextResponse.json(
-        { ok: false, message: "Ese correo ya está en uso" },
+        {
+          ok: false,
+          message: "Ese correo ya está en uso",
+          errors: {
+            email: "Ese correo ya está en uso",
+          },
+        },
         { status: 409 }
       );
     }
@@ -416,8 +463,8 @@ export async function PATCH(request: Request) {
         username,
         email,
         phone,
-        role,
-        status,
+        role::text as role,
+        status::text as status,
         updated_at
     `;
 
@@ -442,16 +489,9 @@ export async function PATCH(request: Request) {
 
 export async function PUT(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedGymSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado para regenerar contraseña" },
         { status: 403 }
@@ -459,14 +499,13 @@ export async function PUT(request: Request) {
     }
 
     const url = new URL(request.url);
-    const userId = url.searchParams.get("userId");
+    const userIdValidation = validateUserId(url.searchParams.get("userId"));
 
-    if (!userId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del usuario" },
-        { status: 400 }
-      );
+    if (!userIdValidation.ok) {
+      return validationResponse(userIdValidation.errors);
     }
+
+    const userId = userIdValidation.userId;
 
     const targetUser = await sql`
       select
@@ -475,7 +514,7 @@ export async function PUT(request: Request) {
         username,
         email,
         phone,
-        role,
+        role::text as role,
         password_hash,
         must_change_password,
         temp_password_expires_at,
@@ -502,9 +541,17 @@ export async function PUT(request: Request) {
       );
     }
 
-    if (!user.email) {
+    const email = cleanEmail(user.email);
+
+    if (!email) {
       return NextResponse.json(
-        { ok: false, message: "El usuario no tiene correo registrado" },
+        {
+          ok: false,
+          message: "El usuario no tiene correo registrado",
+          errors: {
+            email: "El usuario no tiene correo registrado",
+          },
+        },
         { status: 400 }
       );
     }
@@ -535,7 +582,7 @@ export async function PUT(request: Request) {
 
     try {
       await sendCredentialsEmail({
-        to: user.email,
+        to: email,
         fullName: user.full_name,
         username: user.username,
         temporaryPassword,
@@ -595,16 +642,9 @@ export async function PUT(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const session = await getCurrentSession();
+    const session = await getAuthorizedGymSession();
 
-    if (!session || !session.gymId) {
-      return NextResponse.json(
-        { ok: false, message: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    if (!["GYM_ADMIN", "EMPLOYEE"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json(
         { ok: false, message: "No autorizado para desactivar usuarios" },
         { status: 403 }
@@ -612,17 +652,16 @@ export async function DELETE(request: Request) {
     }
 
     const url = new URL(request.url);
-    const userId = url.searchParams.get("userId");
+    const userIdValidation = validateUserId(url.searchParams.get("userId"));
 
-    if (!userId) {
-      return NextResponse.json(
-        { ok: false, message: "Falta el ID del usuario" },
-        { status: 400 }
-      );
+    if (!userIdValidation.ok) {
+      return validationResponse(userIdValidation.errors);
     }
 
+    const userId = userIdValidation.userId;
+
     const targetUser = await sql`
-      select id, role
+      select id, role::text as role
       from users
       where id = ${userId}
         and gym_id = ${session.gymId}
